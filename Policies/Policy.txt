@@ -1,0 +1,955 @@
+Konfer policy reference
+=======================
+
+Everything a policy may put in the descriptor it hands konfer:RegisterPolicy(), what each piece has to do, when the platform
+calls it and with what, and everything the platform puts on the policy in return. Sections 2 to 10 are the contract as the
+code implements it. Section 11 is what the platform does not yet do that a policy will need, section 12 is where the comments
+in the code no longer say what the code does, and section 13 lists bugs found along the way.
+
+This describes the code. Policy.lua documents the descriptor inline and is the contract; this says in more detail when each
+hook is called and from where. Data.txt says which home every piece of state belongs in and why. File references are to
+Konfer unless they name Kore.
+
+
+1.  The life of a policy
+------------------------
+
+Loading
+  A policy is Policies/<P>/<P>.lua, listed in Konfer.toc after every platform file and before Init.lua, with the events only
+  it understands in Policies/<P>/Comms.lua straight after. <P>.lua builds a descriptor table and ends with
+  konfer:RegisterPolicy(descriptor). Comms.lua reaches the registered policy as konfer.policies.<handle> and adds to its
+  handler tables (section 7).
+
+Registration  (Policy.lua RegisterPolicy)
+  Validates the identity fields, normalises the art, fills in defaults, gives the policy its own copies of the standard
+  handler tables and whisper commands, registers it with KoreComms as an endpoint of its own, copies the platform methods onto
+  it (section 8) and stores it in konfer.policies. Every policy registers, switched off or not, so that every config's policy
+  can be resolved. One that registers after Init.lua has loaded is external (see order in section 2). One that registers
+  after the mod has initialised is given at once what startup gives the others: the config it had in hand, its panels when
+  they are being built eagerly, its slash command, and its card in the foyer and the settings window.
+
+Startup  (Konfer.lua OnLateInit)
+  In this order. MakeAliases. UpdateDatabaseVersion. MakeAllConfigs, which puts the methods and the settings proxy back on
+  every config (a metatable is not saved). Each policy is pointed at the config it had in hand at logout,
+  konfer:PolicyDB(pol).defconfig, through RestorePolicyConfig, or at nothing. The active policy is frdb.activepolicy, else
+  konfer.DEFAULT_POLICY ("sk"), else the first policy still switched on, and its config is made current with cfg:SetDefault.
+  Then InitialiseUI (Init.lua).
+
+Initialisation  (Init.lua InitialiseUI)
+  There is one window, konfer.mainwin, and it is the mod's. InitialiseMainWindow builds it once, with every page, and the
+  pages build the platform's half of themselves. A policy's own panels go into slots those pages keep for them, and are built
+  by konfer:BuildPolicyUI, once per policy: BuildListsPolicyUI, BuildLootPolicyUI, BuildUsersPolicyUI, BuildConfigPolicyUI.
+  When that happens is konfer.EAGER_POLICY_UI. Lazily, the first time a policy becomes the active one, is what ships; in
+  development every policy is built at startup, so that a fault in any Construct shows at login. A policy switched off in the
+  settings window builds nothing. Then EnterPolicy for the active policy, and the foyer, the settings window, the user editor,
+  the policy slash commands and the window stack.
+
+The active policy
+  Exactly one policy is konfer.apol. It is the one the window shows and the one the loot engine runs. Every route to a switch
+  goes through konfer:ActivatePolicy(pol): the foyer's Activate, which asks nothing first, double-clicking a card or typing
+  another policy's command, which ask first (konfer:AskSwitchPolicy), and startup. It refuses outright while loot is being
+  handed out (konfer:LootInProgress). Otherwise it calls LeavePolicy on the outgoing policy (OnActivate(false), then its
+  panels hidden), sets apol and frdb.activepolicy, calls EnterPolicy on the incoming one (panels built if they never were and
+  shown, the window given its name, accent and icon by SetWindowPolicy, then OnActivate(true)), empties konfer.raid, and
+  refreshes. cfg:SetDefault only makes a config its policy's current one, with one exception: while the active policy has
+  no config at all, a policy that gains or picks one becomes the active one.
+
+A policy is never consulted about being active, and never assigns apol, currentid or cfg itself.
+
+A config brought up to date
+  When another admin brings one of a policy's configs up to date, the policy is told through ConfigSynced(cfgid, how) on its
+  descriptor, HOW being "full" for a full sync (FSYNC), "events" for the events it was missing (MSYNC) and "recovered" for its
+  owner's recovery of it. It is called whether or not the policy is the active one, once the platform has done its own part,
+  which redraws the window only for the active policy, so it is for what a policy shows or keeps of its own. EP/GP redraws
+  its Journal tab and its Lists page panel when they show that config.
+
+
+2.  Identity
+------------
+
+The first five are required, must be non-empty strings, and are checked at registration, which raises a Lua error on a bad
+one. name, nickname and shortnick must also be unique across every registered policy, and so must the handle.
+
+  handle      Short string naming the policy. It may not be konfer.CMD_MOD ("*"), which is the mod's name on the wire, nor
+              one of konfer.FRDB_RESERVED, the names frdb keeps for the mod. It is cfg.policy, the key in konfer.policies,
+              frdb[handle] (the policy's own saved tables, see konfer:PolicyDB), the key in frdb.policyorder,
+              frdb.policydisabled, the policy's endpoint on the wire (section 7), and the slash command's SlashCmdList name
+              KONFER_POLICY_<HANDLE>. pol.prefix is derived from it as handle .. "_" and every frame name the policy owns
+              starts with pol.prefix.
+
+  name        Localised display name. The foyer card's text when the policy has no TitleCard, the window's page titles while
+              it is the active policy (pol:WindowTitle), the title of its panels on the Admin tab, the item editor and the
+              Lists page's Config tab, the settings window's list, and the tie break when two policies share an order.
+
+  nickname    "Konfer SK". Never shown. Recognised by the chat filter that hides the mod's own whispers.
+
+  shortnick   "KSK". What pol:err(), pol:info() and pol:warn() sign this player's own chat lines with. What goes to the raid,
+              the guild or another player is signed with the mod's name instead.
+
+  desc        Localised description of the policy, how it distributes and what it offers, as many lines as it takes. The
+              platform draws it at the top of the foyer's Overview whenever the policy's card is selected.
+
+The rest are optional.
+
+  command     Slash command without the slash, "ksk", checked at registration against every policy and every slash command
+              the game already knows. Typed bare it calls konfer:OpenPolicy(handle), which asks to switch first when another
+              policy is active. With arguments it runs konfer:OnPolicyCommand(input, pol), the words every policy has
+              (pcmdtab) and the policy's own (Commands), asking to switch first unless konfer:CommandNeedsPolicy says the
+              word needs no policy (createconfig and help). Refused with POLICY_SWITCHED_OFF while the policy is switched
+              off. A policy with none can only be reached from the foyer.
+
+  accent      { r, g, b }, each a number, checked at registration. The window's accent while the policy is active (portrait
+              frame, title plaque and its gem). Fully saturated, since the kit multiplies by it. Without one the window wears
+              the kit gold.
+
+  order       Number, where the policy sorts, lowest first, ties by name. An external policy has
+              konfer.POLICY_EXTERNAL_BASE (100) added. frdb.policyorder, set in the settings window, overrides it. The five
+              in the box also use it as their cell in the art strips (section 3), which is convention and not enforced.
+
+  raid        Booleans for where the policy is usable. Only a nil is defaulted, to raid = true, party = true, bg = false.
+  party       konfer:IsUsableHere(pol) answers from them, battleground first, then raid, then party, and solo is always
+  bg          usable. The loot engine runs only when konfer:AmIML() and IsUsableHere() for the active policy. raid and party
+              are also the policy's reach on the wire.
+
+  costing     True for a policy whose awards carry a price the master looter may discount, every win then being put to
+              them in the costing box (section 5). Only a nil is defaulted, to false. EP/GP and DKP say true.
+
+  channel     Where every config of the policy talks, CHANNEL_GUILD or CHANNEL_OTHER, whatever the config holds (cfg:Channel).
+              A new config is made with it and the Admin tab's Sync via shows it greyed. PUG says CHANNEL_OTHER.
+
+  onelist     True for a policy whose every config runs on one list of its own, made with the config and never shown, and
+              named for the policy. Everybody the config holds is on it, every character standing alone, and it is the
+              config's default list, so every item is given out on it. cfg:MakeOneList makes it and cfg:JoinOneList puts
+              each user added here on it, after the MKUSR. A copy is made with its own and the copy dialog offers none of
+              the source's lists. Such a policy hides the Lists page. PUG says true.
+
+
+3.  Art and the foyer
+---------------------
+
+Art is a texture path, which means the whole texture, or { texture = path, coords = { left, right, top, bottom } }.
+Registration turns a path into the table and gives a table without coords { 0, 1, 0, 1 }. Anything else, or a table with no
+texture string, is a registration error. The policies in the box take theirs from Konfer's strips with
+konfer:PolicyArt(strip, order), strip being "PolicyLogos", "PolicyIcons" or "PolicyCommands".
+
+  TitleCard   The foyer card, twice as wide as it is tall with the bottom eighth a band, drawn by konfer:CreateTitleCard. May
+              instead be a function (pol, button, width, height), which draws the card into BUTTON. It is called once per
+              card button, through pcall, and never again when that button is pointed at another policy. Without either the
+              card is dark with the policy's name on it.
+
+  Icon        The square behind the portrait frame in the window's top left corner while the policy is active, put there
+              by konfer:SetWindowPolicy. Without one the corner is dark.
+
+  CommandPlate  The plaque naming the command, four times as wide as it is tall, drawn at the right hand end of the card's
+              band. Give one only while command is what the picture says.
+
+  beta        True for a policy still in beta, whose card in the foyer wears Kore's Beta stamp over its artwork
+              (Foyer.lua). Loot Council says true.
+
+  PopulateBannerInfo(cfgid) -> height
+              Draws what the foyer's Overview says about the config selected in the Configurations panel, under the
+              policy's desc, which the platform draws at the top whatever the policy, in place of the platform's own. That
+              is a box for each of the config's lists in the Lists page's order, saying how many are on it and showing the
+              whole of a short list, and of a longer one its top three, this character and its bottom three, each with
+              their place in the policy's Order and what ValueText says. A policy whose lists say little gives this
+              instead. Called through pcall whenever a card or a config is selected and on every foyer refresh, with the
+              selected config's id or nil when none is. The frame to draw on is self.foyerinfo, as wide as the panel and
+              set under the description, that the platform creates the first time this policy's card is selected and
+              hides whenever another card is. Answer how tall what was drawn is, nothing for nothing. Build widgets on
+              first call and only update them after, since this is called often. PUG's and LC's draw nothing, so their
+              description stands alone.
+
+
+4.  The window's pages
+----------------------
+
+There is one window and it shows the active policy. Its pages are the mod's, from the tree in Init.lua: Lists (tabs Members
+and Config), Raid (tab Raiders), Loot (tabs Assign loot, Item editor and History), Users, Sync, Config (tabs Loot and Admin)
+and Options, with the config selector in the topbar. The Raid page is everybody in the group, up while the player is in one
+and gone otherwise. A policy contributes panels within those pages, through the hooks below, and tabs of its own on the
+Lists page (ListsTabs), the Raid page (RaidTabs) and the Config page (ConfigTabs), there while it is the active policy and
+gone when it is not.
+
+A policy may also hide the platform pages it has no use for (hidepages), and add pages of its own (Pages), after the
+platform's or wherever its order puts them, each redrawn by its Refresh whenever the member lists are, both only while it is
+the active policy. A page of its own may have tabs, each with a Construct and a Refresh of its own, their strip along the
+page's top bar from the left. The window opens on whichever page is first. PUG hides Lists, so its window opens on the Raid
+page, which it keeps up out of a group, its Reserves tab, tonight's reserves from softres.it, being imported and cleared
+there by an admin and seen by everybody holding the config.
+
+Every hook here is optional, and a missing one is simply not called. Each is called through konfer:PolicyHook, or through
+cfg:PolicyCall for one that takes a config, so a hook that raises is reported once, under the policy's name and the hook's,
+and the page carries on without it. CLIENT is always a plain content frame belonging to the policy, already sized, and the
+policy lays out everything inside it. Frame names inside it start with pol.prefix. A policy's frames hang off the policy
+(section 9) and are hidden whenever another policy is active.
+
+Lists page, Members tab
+  ListsPage   A table. With one, the policy gets a panel under Announce on the Members tab. Without one there is no panel.
+
+    title             What the panel is titled. Defaults to the policy's name.
+    height            Number, required when ListsPage is given, checked at registration. The panel's usable height.
+
+    Construct(client)
+              Called once, from BuildListsPolicyUI, once everything else on the page exists.
+
+    ListSelection(client, cfgid, listid)
+              The selected list changed, or the lists were refreshed. LISTID is nil with no list selected. CFGID is
+              pol.currentid and is nil for a policy with no config.
+
+    MemberSelection(client, cfgid, listid, uid, pos)
+              The selected member changed. UID is nil with no member selected, and UID and POS are both nil while any tab
+              but Members is showing. POS is the member's place in the policy's Order. On a tethered list UID and POS are
+              the main's even when an alt row was clicked.
+
+              Order is ListSelection, then ConfigListSelection, then MemberSelection.
+
+              The panel's title dims when nothing inside it is enabled, so the policy's own SetEnabled calls in these hooks
+              are what light it.
+
+Lists page, Config tab
+    ConfigConstruct(client) -> height
+              The policy's panel titled with its name under List Configuration, for the options it declares in its
+              descriptor's listoptions. Called once, straight after Construct, and answers how tall what it built is. An
+              option calls konfer:ListsPending():Set("p." .. option, value) when the user changes it, which puts it among
+              the tab's unsaved changes and brings up the save bar, and Watch(widget, "p." .. option) once so the widget
+              shows the changed colour.
+
+    ConfigListSelection(client, cfgid, listid)
+              Called after ListSelection on every list selection, and again after every refresh of the lists. LISTID is nil
+              with no list selected. Set the widgets from konfer:ListsPending():Value("p." .. option), which is what is on
+              screen, unsaved changes included, without throwing when there is no list. Refill any choice of lists here,
+              because lists come and go.
+
+              Saving the tab writes the list's own fields, sortorder, def_rank, strictcfilter, strictrfilter, extralist,
+              tethered and altdisp, and the policy's whole block of options on the list, and sends them all in one CHLST.
+              The policy reads an option with pol:ListOption(cfgid, listid, name).
+
+Lists page, the policy's own tabs
+  ListsTabs   An array of tabs after Members and Config. Each is { name, text, adminonly, owneronly, wholepage, Construct,
+              ListSelection }, as documented in Policy.lua. A tab has no save bar, nothing on it being held for saving. A
+              wholepage tab covers the whole page, the column of lists hidden while it is up, and chooses its list for
+              itself.
+
+    Construct(client)
+              Called once, when the policy's panels are built. CLIENT is the tab's content frame.
+
+    ListSelection(client, cfgid, listid)
+              Called beside ListsPage's ListSelection, after it, with the same arguments, whether or not the policy has a
+              ListsPage.
+
+              EP/GP's Journal is one, a wholepage tab: a list's awards of EP and decays, newest first, the list chosen at
+              its foot, each naming on hover everybody it reached.
+
+  InsertUI    { Construct(parent, owner, where) }, the row the insert popup reserves for the policy. Built once per policy
+              and swapped as the active one changes. InsertInfo(cfgid, listid, where) -> pdata is read from it when somebody
+              is picked. Suicide Kings puts Insert randomly there.
+
+  ImportList(cfgid, listid)
+              Put up the policy's own dialog for importing members into LISTID of CFGID. Called by the tab's Import button,
+              which is disabled for a policy without it. What an import takes in and where the people land are the
+              policy's; the platform supplies the parts that are the same everywhere:
+                konfer:ParseNames(text) -> names | nil, why    names separated by commas, or a JSON array, in order
+                cfg:ImportNames(listid, names) -> uids, missing   the config's uids for them, and those it has nobody for
+                cfg:ImportGuildRank(listid, rank) -> uids      a guild rank's members, made users where they are not yet
+                konfer:CurrentListBox(dlg, ypos), konfer:ShowCurrentList(box, cfgid, listid)
+              The two cfg calls take each person once and, on a tethered list, an alt for their main.
+
+  AddMissing(cfgid, listid)
+              The same for the tab's Add missing button, which is also disabled out of a group.
+              cfg:MissingFromList(listid, raidonly) -> uids is who could be on LISTID and is not, the raid's only with RAIDONLY.
+
+Raid page
+  RaidPage    A table, what the policy shows and does on the Raid page, everybody in the group (Raid.lua). Each row is the
+              platform's up to the end of the name, the markers and the roles packed at the far end of the Name column, and
+              the policy's columns follow it. Its hooks are only called with a config in hand. The fields, as documented in
+              Policy.lua, are solo, title(cfgid), columns, Columns(cfgid), Row(cfgid, raider), buttons and
+              Removed(cfgid, uid).
+
+              The list is built once with every policy's columns, so a policy declares all it may ever show in columns,
+              and Columns answers which show for a config and which the list starts sorted on. Row answers a number for
+              each. The policy's buttons stand on the second row under the list, the platform's Remove among them. Broadcast's
+              tooltip and Remove's question are words of the policy's own (Strings: RAID_BROADCAST, RAID_REMOVE).
+
+              EP/GP shows EP, GP and PR and DKP the balance, on the list being worked on (CurrentList), and PUG what
+              tonight has cost each raider, with Penalty, Reward and End raid, keeping the page up out of a group.
+
+  RaidTabs    An array of tabs after Raiders. Each is { name, text, hsplit, adminonly, owneronly, Construct, Refresh }. A
+              tab has no save bar. Refresh is called whenever the page is drawn. PUG's Reserves is one.
+
+Loot page, Item editor tab
+  AssignPage  A table, of what the policy changes about the Loot page's Assign loot tab.
+
+    hide              What on the tab the policy has no use for, as a set. rank is Constraints' guild rank filter and its -
+                      button, the strict filters under it moving up into its room. lists is the Lists panel and forcebid
+                      the panel of Force bid and Force retract under Candidates, which takes whatever room they leave. PUG
+                      hides all three.
+
+    firstroll         { text, tooltip }, for a policy that hides bids: the bids button reads TEXT and opens the item's
+                      first roll while one is owed (FirstRoll), dark otherwise. PUG's reads Reserves. Label (cfgid, ilink)
+                      -> text, tooltip names it for the item selected instead, and Open (cfgid, ilink) -> opened, asked
+                      first when it is pressed, opens something of the policy's own in the roll's place: Loot Council's
+                      reads Council vote and opens the vote, or Roll-off.
+
+  ItemsPage   A table. With a Construct, the policy gets a panel titled with its name in the left column under the Delete
+              button. Without one there is no panel there at all. Who an item goes to, its next drop and award list
+              included, is Item instructions', the platform's, and what a policy keeps on an item is its one opaque pdata
+              field.
+
+    hide              The rows of Item instructions the policy has no use for, as a set of the item fields they set: rank,
+                      list, nextuser, autodel, awardlist. Those under a hidden row move up into its room. PUG hides rank,
+                      list and awardlist.
+
+    Construct(client, changed) -> height
+              Called once, from BuildLootPolicyUI. Answers how tall what it built is, which the panel is made to hold
+              exactly, the Items list above it taking the rest of the column. CHANGED puts what the user has written into
+              IINFO among the editor's unsaved changes. Watch each widget with konfer:ItemsPending():Watch(widget, field, ...)
+              so it shows the changed colour.
+
+    ItemSelection(client, cfgid, itemid, iinfo)
+              Called when an item is selected in the item list, when Ignore item or either auto assign option is toggled
+              (both reset what the policy shows), and when the item list is refreshed. IINFO is the item's edit buffer, or
+              nil with no item selected. Set and enable the widgets from IINFO alone and write edits into it.
+
+              Saving the editor writes the item's fixed set of fields and CHITM carries them. IINFO.pdata is the policy's
+              own, any value it likes, stored on the item, sent with it and never read by the platform. EP/GP keeps an
+              item's custom GP there.
+
+Users page
+  UsersPage   A table.
+
+    title             What the policy's section is titled. Defaults to the policy's name.
+    compact           True to give the section the room the page can spare: the page's buttons go under the user list, two
+                      rows of two without Guild import, and User info has no separator between the config's view of a user
+                      and the character's. PUG's, for its notes.
+
+    Construct(client, changed, width) -> height
+              With this, the policy gets a section under the page's buttons, or under User info and the lists on a compact
+              page, the column wide, WIDTH inside the panel's rings, and answers how tall what it built is, which the panel
+              is made to hold exactly (PUG's
+              notes). Answering nothing, the section runs down to the foot of the page, for one holding something that takes
+              whatever room there is. Called once,
+              from BuildUsersPolicyUI. Without it there is no panel there at all. The panel's title dims while no user is
+              selected, as the page's own do. What the policy keeps about a user is their entry's pdata (section 6), and the
+              section edits it among the page's unsaved changes: CHANGED(pdata) says what it now is, the save bar writes it
+              with the rest and sends it in the one MDUSR, and konfer:UsersPending():Watch(widget, "pdata") gives a widget
+              the changed colour.
+
+    UserSelection(client, cfgid, uid, pdata)
+              The selected user changed, or the section has just come up. UID is nil when nobody is selected. PDATA is what
+              is kept about them as it stands on screen, unsaved changes included, a copy the policy may change as it likes.
+
+    CreateConstruct(dlg, ypos) -> ypos
+              Adds the policy's fields to the create user dialog, under the standard ones and the platform's Raid enchanter
+              box, at DLG.x from YPOS down, and returns where the next field would go. Called once, when the dialog is built,
+              which is the first time Create is clicked while this policy is active. dlg.entry is a fresh table every time
+              the dialog opens, and each field resets itself on the dialog's OnShow and writes into dlg.entry.pdata, which
+              the new user's entry keeps as their pdata. dlg.shared holds the standard fact widgets (pprof, sprof and the
+              rest).
+
+Config page, the policy's own tabs
+  ConfigTabs  An array of tabs after Loot and Admin. Each is { name, text, adminonly, owneronly, Construct, Refresh }, as
+              documented in Policy.lua. A policy with loot options of its own puts them here, the Loot tab being the
+              platform's and having no room for a policy's section.
+
+    Construct(client, pending)
+              Called once, when the policy's panels are built. PENDING is the tab's unsaved changes, the same object
+              konfer:PolicyTabPending(pol, name) answers, holding the policy's own settings as "p." and the name. Saving
+              sends them as one PSSET.
+
+    Refresh(client, cfgid)
+              Put CFGID's values back, from PENDING so an unsaved change still shows. CFGID is the config picked in the
+              Admin tab's list, or nil with none picked.
+
+              EP/GP's Advanced tab, the owner's only, holds the price of gear.
+
+Config page, Admin tab
+  CreateConfigUI(parent) -> height
+              Builds the policy's own config options into PARENT, the panel titled with the policy's name on the Admin tab.
+              Called once, from BuildConfigPolicyUI. Return the height used, from the top of PARENT to the bottom of the
+              lowest widget, and the panel is made exactly that tall. Return nil and the panel ends level with the
+              Co-admins panel. The Admin tab is every admin's; within it, the owner and co-admin controls enable only for
+              the owner. Nothing on the tab is written when it is changed: an option calls konfer:AdminPending():Set with
+              "p." and the setting's name, and saving sends the policy's as one PSSET.
+
+  RefreshConfigUI(cfgid)
+              Put CFGID's values back into those widgets. CFGID is the config the Admin tab has selected, which need not be
+              the one the window has in hand. Called when the selection changes and when the roll lists do.
+
+  EnableConfigUI(onoff, cfgid)
+              The Admin tab gained or lost a selected config, CFGID or nil. The panel dims only its title, so enable or
+              disable the widgets here.
+
+  ConfigLootPage  { hide }, what on the Config page's Loot tab the policy has no use for, as a set. bids is everything
+              about bidding: Bid options, after which Roll options says what becomes of an item nobody rolls for, the
+              heading and the enchanters to assign it to, and Enable silent bidding in General options. PUG hides it.
+              Any announcement on the Announcements menu may be named by its setting as well, ann_winners_guild for
+              Winners in guild chat, and it is then off the menu and never made, whatever the config says, every one of
+              them being read through cfg:Announces. PUG hides that one and ann_missing, Raiders not on current list.
+              announce_guild is In guild chat under Announce loot, loot the config says to announce there then being
+              announced nowhere (konfer:LootAnnouncedTo). PUG hides it.
+
+  AdminPage  { hide }, the platform's panels on the Admin tab the policy has no use for, as a set. options is Options, the
+              default list, guild rank filtering and rank order, and without it the policy's own panel starts at the top of
+              the right hand column. PUG hides it.
+
+  AdminPanel  { title, Construct(client) }, a second panel of the policy's own under the first, running down to the foot
+              of Co-admins, there only when CreateConfigUI answered a height. Built once, straight after it. Its edits may
+              be held in konfer:AdminPending() as the first panel's are or saved as they are made, which is the policy's
+              choice, and RefreshConfigUI and EnableConfigUI cover it too. EP/GP's and DKP's awards are one, saved as made.
+
+The policy's command
+  Commands    An array of { word, args, help, Run } (Policy.lua), words after the policy's slash command beside the
+              platform's. Run(input, pol) is only ever called with a config in hand, the policy being the active one, and
+              /<command> help lists them after the platform's. A word the platform answers stays the platform's.
+
+Every page
+  GuildRanksChanged(ranks)
+              The guild's ranks changed, or this character's guild did. RANKS is { { text = K.NONE_STR, value = 0 },
+              { text = rankname, value = index }, ... }, the list the platform's own rank dropdowns use. Refill any rank
+              choice of the policy's own, keeping the selection with SetValue(old, true) so it does not read as an edit.
+              Called for every registered policy, including ones switched off and never built, so check the widgets exist.
+
+  PositionText(cfgid, listid, uid, pos) -> string
+              How the policy words a member's standing, POS being their place in its Order. Called through PolicyCall on
+              the Lists page's members, the Loot page's candidates, the Users page's lists, the raid announcement of a bid
+              and the Lists page's Announce. The default is tostring(pos). A tethered alt's row on the Lists page shows
+              nothing whatever this returns.
+
+  ValueText(cfgid, listid, uid) -> string
+              What a member is worth on a list, in brackets after their name in the foyer's Overview, their place in the
+              policy's Order already standing before it. Nothing where it answers nil, and a policy whose standing is its
+              place gives none. EP/GP says "PR 1.71" and DKP "3121 DKP".
+
+  UserTooltip(cfgid, listid, uid) -> array of { left, right }
+              What the policy says about a member on a list, under a blank line on their tooltip on the Lists page and
+              among the Loot page's candidates. Nothing where the tooltip is about no list. EP/GP and DKP give the
+              member's numbers and their lifetime totals.
+
+  ItemTooltip(cfgid, ilink) -> { title, lines }
+              What the active policy says about an item, under a blank line on every item tooltip the game draws, with
+              the config it has in hand, a raider's copy included, the title optional. EP/GP and DKP give its price as
+              each kind of bid the config takes, or at auction the least each may bid. PUG names who reserved it.
+
+  BroadcastArriving(cfgid) -> before, BroadcastArrived(cfgid, before)
+              Either side of a broadcast replacing a copy this client already holds, for telling the player what it
+              changed for them. EP/GP and DKP keep the player's numbers on each list and say which came out different.
+
+  standingfont, standingwidth
+              The font PositionText is drawn in and how many characters the widest standing has, for the standing column
+              on the Lists page's members and the Loot page's candidates (konfer:StandingColumn). A width of 0 is a
+              policy with no standing to show, whose PositionText answers "", and the column takes no room. PUG says 0.
+
+  Strings     Table of words the platform draws, keyed by name, values already localised. pol:Str(word) returns the
+              policy's word, else the platform's neutral one, else the key itself so a typo shows on screen. The words are
+
+                AWARD_BUTTON     the button that applies an award to a list member by hand. The platform draws none
+                                 itself; SK's own Lists panel uses it.
+                AWARD_EXTRALIST  the label on the list option naming the extra list an award also lands on.
+                AWARD_ITEMLIST   the item editor option naming the list an auto assigned item's award is applied on.
+                AWARD_ROLL       the raid warning opening a roll that carries an award, taking list name, item and seconds.
+                AWARD_UNDO       the undo dialog's question.
+                AWARD_AUTO       what the master looter is told the award will do, when asked whether to go through
+                                 with an item's instructions, taking the list. The winner is already named.
+                COST             the caption of the cost in the costing box, saying what it is counted in:
+                                 "Cost (GP)" for EP/GP.
+                BID_STANDING     where a bidder stands, in the raid announcement of their bid, taking PositionText's.
+                ANNOUNCE_RAIDERS the heading of what the Lists page's Announce says to the raid, taking the list name.
+                                 The mod's name goes in front and the raiders after, each with PositionText's.
+                ANNOUNCE_ALL     the same for Announce all, whose members carry no standing.
+                NOT_ON_LIST      what the master looter is told before the raiders not on the list loot is being given
+                                 out on, taking the list name.
+                HELP_STANDING    the help whisper's line for the standing whisper, taking the asker's name and the word.
+                                 PUG's says it shows what tonight's wins have cost, PUG answering that whisper itself.
+
+  Whispers    What the policy calls each whisper command a raider can send, keyed by the platform's name for it. What each
+              does is the platform's (konfer.std_whispers, copied onto every policy); Suicide Kings answers "suicide" and
+              "position" where the platform would say "standing". Each kind of bid is a whisper of its own, "bidM" to "bidV",
+              "!ms" or "!os" and their aliases, an amount following where bids take one; a kind is the platform's, and so
+              are its words, which each locale lists and which answer the English words besides. A key that is none of the
+              platform's is a whisper of the policy's own, its handler put in pol.whispers after registration: PUG's
+              "reserves", "!sr".
+
+
+5.  Loot
+--------
+
+A list is always required to bid, whatever the policy: the item's own list, else the config's def_list, else the list
+selected. Who wins is the policy's. The loot engine asks it through cfg:PolicyCall, which pcalls the hook and falls back to
+the default when it is missing or raises, telling the player once a session through pol:err. Only the master looter ranks;
+everybody else shows what it sends.
+
+  Order(cfgid, listid, uids, loot) -> uids
+              The list's members in display and priority order. Defaults to the stored array. cfg:ListPosition walks it, so
+              it is what every position the platform shows or announces is counted in. LOOT is true for the Loot page's
+              candidates, who may be ordered differently from the list: EP/GP breaks a tie on PR by EP there alone, and
+              everywhere else by name, as DKP does a tie on balance. PUG orders by name alone.
+
+  BidAmounts(cfgid) -> boolean
+              Whether a bid names an amount as well as a kind, "!ms 150". The raid is told as bids open, which puts a box to
+              type it in beside Bid on item, and a bid without one is refused; where it is false an amount whispered after
+              the word is ignored. With silent bidding off the amounts go to the raid with the bidders and into the
+              announcements, and with it on nobody but the master looter sees them. DKP says yes when it runs auctions.
+
+  RankBidders(cfgid, listid, bidders, ilink) -> bidders
+              BIDDERS arrive by .tier, the place the config's Bid options give their kind (lower is better), within a tier
+              highest .amount first where bids take one, then in Order's order, each with .uid, .kind, .tier, .amount, .idx
+              and .standing. Return the same tables, reordered or thinned, winner first. The master looter calls it afresh
+              on every bid, change of bid and retraction and whenever the list moves, and BIDER carries the result whole to
+              the raid. Bidders the policy cannot tell apart share a .tie; when bids close with the first two sharing one,
+              those tied roll off, main spec, and the winner has the bid they made (VIA "bid"), for what they bid.
+
+  MayBid(cfgid, listid, uid, kind, amount, ilink) -> allowed, why
+              Whether UID may bid KIND on ILINK at all, for AMOUNT where bids name one, asked after the platform's own checks
+              and again when a bid changes, WHY being whispered back when not. EP/GP refuses a member below its minimum EP
+              when the config says so, and DKP one who cannot afford the bid or the item.
+
+  RollAwards(cfgid, listid, ilink) -> boolean
+              Whether an open roll on ILINK carries an award for its winner as a bid would. Shift when opening the roll asks
+              for the other. Without it a roll awards nothing and the winner simply gets the item.
+
+  RollCeiling(cfgid, uid, kind) -> top
+              In a roll that carries an award, the most UID may roll of KIND out of its hundred. PUG's decay answers it.
+
+  RollPriority(cfgid, uid, kind, ilink, awards) -> number
+              Where UID stands among the rollers of their kind's tier, ahead of what they rolled, lower first, in any roll,
+              AWARDS saying whether it carries an award. PUG puts an item's soft reservers first, and in a roll that carries
+              an award the fewest +1s.
+
+  MayRoll(cfgid, uid, kind, ilink) -> allowed, why
+              Whether UID may roll on ILINK at all, asked as their first roll in it arrives, WHY whispered back when not,
+              and of every candidate with KIND nil: the Candidates are those it allows who meet the item's Constraints,
+              whatever the policy. PUG keeps everybody but the reservers out of an item's first roll.
+
+  FirstRoll(cfgid, ilink) -> boolean
+              A roll owed to a few, those MayRoll lets in, before anybody else. While it is owed the bids button opens it
+              under the name AssignPage.firstroll gives it, and Open roll is dark. Only a policy that takes no bids has one.
+              PUG's are its soft reserves, where its config says they keep others out, the button reading Reserves. Loot
+              Council's are an item the council has yet to vote on, which the button opens the vote on instead
+              (AssignPage.firstroll.Open), and claimants the council left level.
+
+  FirstRollUnanswered(cfgid, ilink)
+              Nobody rolled in the first roll. The item is back on offer rather than going where an item nobody rolls for
+              goes, and every client is told, EROLL carrying it, so its Candidates follow. PUG lets everybody in.
+
+  RollNotice(cfgid, ilink) -> text
+              Said to the raid as a roll opens, after the line opening it. PUG names the item's reservers.
+
+  ItemClaim(cfgid, ilink) -> claimed, uid, award
+              An item spoken for, never rolled or bid on. Claimed for UID, somebody who can have it, it is put to the master
+              looter as an item's own instructions are, before them, and otherwise it is theirs to hand out, Open roll and
+              Open bids staying dark on it. AWARD makes the win an award on the list the item is given out on, the policy's
+              Award and HistoryEntry with VIA "assign"; without it the win is the platform's A row. PUG's hard reserves
+              answer it, each claiming its item while whoever it is for is in the group, and leaving it to the master
+              looter, a roll included, while they are not. Loot Council's decisions answer it with an award. A policy whose
+              claim has just been decided puts the item on offer again with konfer:OfferLoot (section 10).
+
+  Kinds of bid and roll are one table, ROLL_KINDS in Loot.lua, and are not a policy's to declare. Every policy has all four,
+  "M" main spec, "O" off spec, "T" transmog and "V" vanity, and a config takes main spec and whichever of the others its Bid
+  options switch on. Which kind outranks which is the config's too. Rolls resolve by kind, main spec's range first, highest
+  in a range winning. The winner's kind reaches Award and HistoryEntry.
+
+  The win (Loot.lua, THE WIN)
+              A win is somebody winning a bid or a roll, or an item's own instructions naming somebody. The master looter is
+              always asked whether to go through with instructions, and yes is that person winning the item exactly as a
+              bid is won; no leaves the item on offer as any item is.
+
+              A policy with costing puts every win to the master looter in the costing box, with the policy window standing
+              aside: the item, the winner, the list the award is charged on as a dropdown they may change, and what it costs
+              as up to four digits, filled in with the policy's price for them to type over, with Full price, 25%, 50% and
+              75% off and Free. Each charges its share of what the box says, the policy's price when it is emptied. There is
+              no Cancel and no closing it. The box is shown even where the price is 0, a plain roll's win included.
+
+              A roll's win or an item's instructions may be put on -None-, no list at all, which is where one carrying no
+              award starts: nothing is charged, the cost reads 0 and can be neither typed in nor discounted, Full price reads
+              Award item, and the history row is the platform's, the roll's kind or A. A won bid, a roll-off included, is never offered -None-, Free
+              being how it is given for nothing.
+
+              Pressing a button, or for a policy without costing the win itself, decides it: the award at that cost, its
+              history row, and the announcement to the raid and the guild. Then the item is handed over, where the config
+              auto-assigns loot when bids close and the winner is in the group. A policy without costing asks the master
+              looter first, "shall I auto-loot this to X?", and Cancel leaves the handing over to them. A hand-out the game
+              refuses is delivery failing, not the win, which stands. Either way the item leaves the loot list.
+
+              Nobody winning, nobody having bid or rolled, is no award and nobody is asked: a roll where the config says to
+              try one, and otherwise the item goes, where loot is auto-assigned, to the master looter if it is a BoE and
+              the config says so, else to the first of tonight's enchanters who can have it, else to the master looter.
+
+              An item the item editor sets to go to the enchanter or the master looter is not won. It is offered like any
+              item whatever its quality, and picking it asks the master looter whether to hand it over. Yes does only that,
+              with no award, no costing box and nothing announced, and writes the platform's D or A row. No leaves it on
+              offer. One for the enchanter that no enchanter can have goes to the master looter.
+
+  Cost(cfgid, listid, uid, ilink, kind, bids) -> number
+              What the win costs, the number the costing box starts at, captioned with the policy's COST word. BIDS, for an
+              item won by bidding, is every bid as it stood when bids closed, winner first, each { uid, kind, tier, amount },
+              which is what a price that comes from the bidding is worked out from; nil for a roll or instructions. Only a
+              policy with costing is asked, and nil is 0. EP/GP answers ItemPrice, which is the item's own price where the
+              item editor gives it one. DKP answers the same at a fixed price, and at auction what the winner bid, or the
+              next highest bid of the same tier where the config says so.
+
+  Award(cfgid, listid, uid, ilink, rlist, chain, nocmd, norefresh, kind, cost) -> { { listid = id, token = anything }, ... }
+              UID has won ILINK on list LISTID. Apply that to the standings and return one entry per list actually changed,
+              each with an opaque TOKEN that will come back to UndoAward. Return an empty table, or nil, when nothing
+              changed.
+
+              RLIST is cfg:CreateRaidList(listid), the members of the list who are in the raid, reserved, or have a
+              tethered alt in the raid, in list order. CHAIN says the award also lands on the list's extra list, a
+              platform option of every list, which a loot award does and a correction by hand does not. Suicide Kings
+              suicides the winner on both lists and EP/GP charges them on both, each list a move of its own. NOCMD means the
+              award arrived from another admin, so record no event. NOREFRESH means the caller is replaying a batch and will
+              refresh once at the end. ILINK is nil for an award made by hand. KIND is the kind of bid or roll that won, and
+              nil for none. COST is what the master looter charged in the costing box, nil where the policy's own price
+              stands.
+
+              cfg:AwardItem is the platform's side and is what the loot engine calls when a win is decided, always with the
+              active policy's current config and CHAIN true. It answers (moves, ok), OK false when the hook failed, and then
+              nothing is done: the costing box stays up, or the item is back on offer. Unless NOCMD, it pushes one undo
+              record for the whole award. SK also calls it from its Lists panel and from its SULST handler.
+
+              A policy that sends an event here sends it from Award, through its own AddEvent, and skips it when NOCMD is
+              set, and its handler for that event calls cfg:AwardItem with nocmd = true (Policies/SK/Comms.lua).
+
+  UndoAward(cfgid, listid, uid, ilink, token, nocmd)
+              Reverse an award on one list, TOKEN being what Award returned for LISTID. Send the policy's undo event unless
+              NOCMD. cfg:UndoAward calls it for each move, newest first, and only then, when not NOCMD and ILINK is set, puts
+              ILINK back on the loot list and writes a "U" history row. A policy whose token cannot be sent as it is must
+              turn it into something its handler can rebuild.
+
+  HistoryEntry(cfgid, via, listid, uid, ilink, kind, cost) -> how, pdata
+              The loot history row for an award, COST as Award has it. A row's HOW is upper case for the platform's own ways
+              an item leaves (a plain roll, disenchanting, a BoE to the master looter, one the master looter kept, an undo)
+              and lower case for the policy's. Every row names
+              the list it was given out on, the platform's field, false for none. PDATA beside it is kept by whoever owns HOW
+              and never read by the other. VIA is "bid", "roll" or "assign", and this is called before the award, so it
+              records how things stood when the item was won. A HOW that does not start with a lower case letter is refused
+              and the award goes unrecorded. PDATA travels in LHADD, a broadcast and a sync as it was returned. SK answers
+              "s", "r" and "a" with the position; EP/GP answers "g", "r" and "a" with { gp, kind }; DKP "b", "r" and "a"
+              with { cost, kind }.
+
+  HistoryText(cfgid, how, listid, pdata, colour) -> howtext, whattext
+              What the History tab draws in the How and What columns for one of this policy's rows. An empty string leaves the
+              column to the platform. With COLOUR it is what the list draws, without it plain words, which the list sorts by
+              and an export carries.
+
+  WinText(cfgid, how, listid, pdata, who, ilink) -> text
+              How the raid and the guild are told WHO won ILINK with an award on LISTID, without the mod's name, which the
+              platform puts in front. Nil or an empty string gives the platform's plain line. SK says
+              "Oswald[3] won ... on the "Main Raid" list. Grats!".
+
+  EncounterEnded(enc)
+              A boss fight ended, won or lost, as KoreLoot's encounter_ended hands it on. ENC is { id, name, difficulty,
+              size, killed, when }, the game's encounter id, the fight's name, its difficulty id, the group's size, whether
+              the boss died, and when, in UTC seconds. Every client in the fight hears it, so a policy that acts on one checks
+              who it is for itself. Called for the active policy only. EP/GP and DKP offer the master looter the boss's award
+              on a kill (Points.lua).
+
+  StatusChanged(name, status, onoff)
+              NAME, somebody in the group, gained one of the marks the raid frames show, ONOFF true, or lost it, false, as
+              KoreParty's status_changed hands it on. STATUS is one of KRP's STATUS_ constants. Joining a group gains
+              everybody's. Called for the active policy only. PUG warns its player of a main tank they rated a terrible tank.
+
+  rl.journal  (a list field the policy fills)
+              The policy's record of what it did to a list that is not in the loot history, EP/GP's and DKP's awards and
+              decays and DKP's zero-sum shares. The platform copies it with the list and never reads it; the policy fills it
+              from its own events, so every admin's copy is filled alike, and sends it in its ListInfo, as EP/GP does
+              rl.lastdecay.
+
+  A policy with no Award does nothing to standings when someone wins, and one with no HistoryEntry writes no history for it.
+  The item is still given.
+
+  EP/GP and DKP share earning points, decaying them, the journal, the price of an item, the award, adjust and decay
+  dialogs, the Lists page's panel, the Journal and Advanced tabs, the item editor's price and the import dialogs, all of
+  it in Policies/Points.lua (konfer.points). Each hands points:Setup its own numbers, words and event names before it
+  registers, and points:Events its registered self, and keeps what is its own: how it ranks, and what winning does.
+
+  PUG and Loot Council share the tally, what tonight's wins have cost each raider: the kind of raid, simple, +1 or decay,
+  and what it counts by, the raid that keeps the counts on the config, the hooks that make a roll cost (RollAwards,
+  RollCeiling, RollPriority, Award, UndoAward, HistoryEntry, HistoryText, WinText), the Raid page's columns and buttons,
+  the question at login about a raid never ended, and the standing whisper, all of it in Policies/Tally.lua
+  (konfer.tally). Each hands tally:Setup its own event names before it registers, PUG its reserves as a priority ahead
+  of the +1s, and tally:Events its registered self; any hook a policy defines itself is its own, Loot Council wrapping
+  the tally's for the wins its council decides.
+
+
+6.  Data a policy works with
+----------------------------
+
+A policy has no saved variables of its own. Its configs are konfer:PolicyConfigs(pol), frdb[handle].configs keyed by config
+id, and each is an object: its fields are the data the database saves, and everything that acts on one is a method from
+konfer.configmethods (section 10). Data.txt says where every piece of state lives and why; in short:
+
+  cfg.settings   The platform's settings, a proxy over the two strings cfg.opts and cfg.vals (konfer.copts, konfer.cvals).
+  cfg.psettings  [handle] = the policy's own settings, declared in its defaults, read and written with pol:Setting and
+                 pol:ChangeSetting, and sent whole as PSSET.
+  cfg.pdata      [handle] = the policy's own data on the config, declared in its configdata and read with
+                 cfg:PolicyData(handle). Whole only when the config travels whole; between admins, changed an entry at a
+                 time by the policy's own events. EP/GP's and DKP's awards.
+  cfg.uids       [uid] = { name, enchanter, frozen, pdata }, positional through konfer.CFGUSER_*. Enchanter and frozen are
+                 the platform's, in every policy. pdata is what the policy keeps about the user, any value it likes,
+                 read with cfg:UserPData and written with cfg:SetUserPData, and sent whole in MDUSR, a broadcast and a sync.
+                 The facts about the character are Kore's, in KU.users.
+  cfg.lists      [listid] = { name, sortorder, def_rank, strictcfilter, strictrfilter, extralist, tethered, altdisp, users,
+                 standings, journal, poptions, ... }. users is the ordered array of uids, whose order is the policy's to
+                 decide (SetMemberInfo). standings is rl.standings[uid], made by pol:Standings. What the policy says about a
+                 member or a list travels as pdata through MemberInfo / SetMemberInfo and ListInfo / SetListInfo.
+                 poptions[handle] = the policy's own options on the list, declared in its listoptions, read with
+                 pol:ListOption and edited on the Lists page's Config tab, sent whole in that tab's CHLST.
+  cfg.items      [itemid] = the platform's item instructions and pdata, the policy's own.
+
+Every change to a config that other admins must see goes through an event, because the checksum is a running XOR over the
+event stream (section 7). pol:AddEvent(cfgid, cmd, ...) sends one of the policy's own.
+
+
+7.  The wire
+------------
+
+Every policy is its own endpoint, and they all talk under the mod's one prefix, KONFER. RegisterPolicy registers the policy
+with KoreComms and gives it an endpoint name, its handle, which every message it sends carries.
+
+A Kore message is a version letter, a checksum and a payload Kore never looks into, and nothing in it is this mod's. Kore is
+generic and Konfer sits on top of it, so everything about a message that is Konfer's is said inside that payload, in the
+four values every one of them begins with:
+
+  konfer.protocol   this mod's protocol version, compared by the receiver before it reads anything else. Higher than ours
+                    means arguments we cannot read, so KC.OldProtoDialog and nothing further.
+  endpoint          a policy's handle, or konfer.CMD_MOD ("*") for the mod itself.
+  cmd               the command.
+  cfgid             the config it is about, or false, so the slot is there whether or not it is filled.
+
+konfer:MakeSends (Policy.lua) puts all four there. Kore gives every endpoint SendAM, SendGuildAM and SendWhisperAM and
+nothing else, and MakeSends stands this mod's own in front of those three and adds the three C variants, which are a
+policy's alone: a config belongs to one policy and the mod has no current config of its own. Each also tells Kore whether
+the message is worth holding while the game refuses addon messages, which Kore cannot work out for itself.
+
+konfer:AcceptMessage is where a policy this client does not run, or one the user has switched off, stops. It runs on the
+endpoint value once Kore has deserialised, because nothing about a Konfer message is legible before then. A message about a
+config this policy does not hold is dropped just after it.
+
+One prefix rather than one each because the game's cap on them is the client's and is shared by every addon the player runs,
+and because every policy ships inside Konfer and registers at load, so a client that hears one hears them all whatever they
+are addressed to.
+
+Handler tables
+  pol.ihandlers and pol.ehandlers are the policy's own copies of konfer.std_ihandlers and konfer.std_ehandlers, made at
+  registration. A policy's Comms.lua adds commands only it knows, replaces a standard one it wants handled differently, or
+  sets one to nil to stop answering it. None of this touches any other policy. Event names are five characters by
+  convention and stay the policy's own (SULST, SUNDO, SUMOV, KEGEP, KEGGP), never a shared AWARD.
+
+  ihandler(konfer, sender, proto, pol, cmd, cfg, ...)
+              Immediate raid traffic, recorded nowhere. No admin check, no event id, no checksum.
+
+  ehandler(konfer, live, sender, proto, pol, cmd, cfg, ...)
+              Part of the config's event stream. LIVE is true for an event that arrived on its own and false for one
+              replayed in a sync batch. A handler redraws only when LIVE, a batch redrawing once when it ends.
+
+  The first argument is the konfer addon rather than the policy, because the handlers are the mod's code whichever policy's
+  copy of the table holds them, and POL is the policy the command named. A handler wanting the policy of some other config
+  still asks konfer:GetPolicy(cfgid).
+
+Dispatch  (Comms.lua AcceptMessage, then commdispatch, then policy_commdispatch)
+  In this order. A payload that did not deserialise is dropped. One from a protocol above ours raises KC.OldProtoDialog and
+  is read no further. One for a policy this client does not run, or one the user has switched off, is thrown away. One named
+  CMD_MOD goes to the mod's own handlers and a command that is not one of them raises KC.OldProtoDialog. Then, for the
+  policy the message named: one naming a config this policy does not hold is dropped, ihandlers included. An ihandler
+  runs and that is all. A command that is not an ehandler either raises KC.OldProtoDialog. An event with no config is
+  dropped. A non-admin drops anything not sent as a user event. Everybody drops an event from an unknown sender or from
+  someone who is not an admin of the config. While the config is syncing an admin also drops an event whose previous event
+  id does not match what it last had from that sender, or whose checksum before does not match ours, and otherwise folds it
+  into the checksum and records its id. An event whose arguments do not decode is dropped. Then the ehandler runs with LIVE
+  true.
+
+Sending
+  pol:AddEvent(cfgid, cmd, ...)
+              Records and sends an event of the policy's. Only an admin's changes are events: for anybody else it records
+              and sends nothing. Otherwise it XORs the event into the checksum, queues it for every other admin's sync while
+              the config is syncing, and sends it through the config's policy's CSendAM. cfg:AddEvent and cfg:AdminEvent are
+              the platform's own.
+
+  While retail refuses addon messages (an encounter, a challenge mode run, a PvP match or restricted addon chat) Kore holds
+  every event, and sync, recovery and broadcasts, sending them in order once the restriction lifts, and drops everything
+  else, chat included, telling the player once.
+
+  pol:CSendAM(cfgid, cmd, prio, ...)
+              Sends about CFGID to the group this character is in. Out of a group, it goes as CSendChannelAM sends.
+
+  pol:CSendChannelAM(cfgid, cmd, prio, ...)
+              Sends about CFGID to the guild when cfg.channel is guild and this character is guilded, else to the group,
+              in a group or not. The sync request, the users refresh and the loot history broadcast. With CSendAM, the only
+              reader of cfg.channel.
+
+  SendAM, CSendGuildAM, SendGuildAM, CSendWhisperAM, SendWhisperAM, SendText, SendGuildText, SendWhisper, SendWarning
+              This mod's own, put there by konfer:MakeSends over the three Kore gives every endpoint. Each writes the four
+              value preamble and tells Kore whether to hold the message. The non-C ones send false for the config.
+
+The standard set every policy gets
+
+  ihandlers   ACKRS ALOOT BICAN BIDCL BIDER BIDME BIDOP BIDRT BIREM CLOOT EROLL FLTCH FSYNC GSYNC LISEL LLSEL MSYNC OLOOT
+              OROLL PROLL RCACK RCOVR REQRS RFUSR RKIND RROLL RSUSR RSYNC SYNAK TROLL XROLL.
+              RCOVR and RCACK are recovery, and are the only ones here naming no config at all: the owner asking for one back
+              may hold it under an id the admin answering does not, or under none, so RCOVR names it by name and finds it in
+              POL. BIDER carries the bidders as the policy ranked them. REQRS and ACKRS are the raid's settings, who is
+              reserved and tonight's disenchanters. FSYNC and MSYNC are how a full or partial sync arrives, and MSYNC replays
+              each event through the config's policy's ehandlers with LIVE false.
+
+  ehandlers   CHITM CHLST CHSET CHUSR CPLST DMLST IMLST LHADD MDUSR MKADM MKITM MKLST MKUSR MVLST MVUSR PSSET RMADM RMITM
+              RMLST RMUSR SMLST.
+              IMLST and SMLST carry the policy's pdata for a member and a whole list, MDUSR a user's whole entry, the
+              policy's pdata for them included. CHITM carries the item's instructions and its pdata. CHSET carries the
+              platform's settings whole, PSSET a policy's. LHADD carries the row's HOW, its list and the pdata of whoever
+              owns HOW. MKADM and RMADM are user events, sent only by the owner, so raiders know who the admins are.
+
+  The mod's own, not copied onto policies, are DEBUG CINFO CIACK BCAST CSYNC. CINFO and CIACK are the character info
+  check, which is this mod's whole and lives in CharInfo.lua. BCAST and CSYNC are the mod's because the receiver may hold
+  neither the config nor the policy: BCAST carries the config's policy and channel, and CSYNC is every config this client
+  syncs, across every policy, in one message.
+
+
+8.  What RegisterPolicy puts on the policy
+------------------------------------------
+
+All of these are assigned unconditionally, so a descriptor field or method of the same name is silently replaced.
+
+  prefix            handle .. "_".
+  external          True when registered after Init.lua loaded.
+  order             The descriptor's order, plus POLICY_EXTERNAL_BASE when external.
+  raid, party, bg   Defaulted where nil.
+  StandingFields    {} where nil.
+  ihandlers         Copy of konfer.std_ihandlers.
+  ehandlers         Copy of konfer.std_ehandlers.
+  whispers          Copy of konfer.std_whispers, with whisperwords and whisperword, the words the policy answers to.
+  endpoint          The handle, which goes in front of every command this policy sends.
+  CHAT_MSG_PREFIX   konfer.CHAT_MSG_PREFIX, the mod's, every endpoint sharing the one.
+  protocol          konfer.protocol.
+  comms             The descriptor KoreComms reads. Nothing in it says anything about what this policy sends, that not
+                    being Kore's to know.
+  WindowTitle(what) The window's title while this policy is active, "<Konfer> Suicide Kings - WHAT".
+  (Konfer's)        SendAM, CSendAM, CSendChannelAM, CSendGroupAM, SendGuildAM, CSendGuildAM, SendWhisperAM, CSendWhisperAM,
+                    from konfer:MakeSends.
+  (Kore's)          SendText, SendGuildText, SendWhisper, SendWarning. There is no OnCommReceived: a policy never subscribes,
+                    only the mod does, and its dispatcher hands a policy the messages that named it.
+
+  Standings(cfgid, listid, uid) -> record
+                    rl.standings[uid], creating the table and the record, every StandingFields name starting at 0. Nil for a
+                    config or list that does not exist. Records no event.
+  AddEvent(cfgid, cmd, ...)
+                    Section 7.
+  Members(cfgid, listid) -> uids
+                    rl.users, the stored order, or {}.
+  UserConfigs(kuid) -> { { id, name }, ... }
+                    This policy's configs with an entry for KUID. Konfer's consumer in Konfer.lua asks every policy, so that
+                    Kore can refuse to delete somebody still in use. A rename asks a policy nothing: its entries name the
+                    KUID, which a rename does not change, and everything it keeps about a person is keyed by uid.
+  Setting(which, cfgid), ChangeSetting(which, val, cfgid)
+                    The policy's own settings (section 6).
+  ListOption(cfgid, listid, which)
+                    The policy's own option WHICH on list LISTID, declared in its listoptions (section 6).
+  debug             konfer.debug.
+  err(fmt, ...)     Error to this player's chat frame, signed with the shortnick.
+  info(fmt, ...)    The same as information.
+  Str(word)         Section 4, Strings.
+
+
+9.  State the platform keeps on the policy
+------------------------------------------
+
+Read these, never write them. A policy's own state on its own table must not use these names.
+
+  currentid       Id of the config this policy has in hand, or nil. Written only by konfer:SetPolicyCurrent.
+  cfg             That config's table, or nil. Always agrees with currentid.
+  sortedlists     { { id }, ... } by sortorder then name, or nil before the Lists page has sorted them.
+  sortedusers     { { id, main, hasalts, tree }, ... }, mains by name with alts folded under them. Rebuilt by the Users page.
+  built           True once this policy's panels have been built (konfer:BuildPolicyUI).
+  foyerinfo       The foyer frame of section 3.
+  listsframe, listscfgframe, itemsframe, usersframe, adminframe, adminextraframe
+                  The frames the policy's panels are built into on the Lists page's two tabs, the item editor, the Users
+                  page and the Admin tab's two, nil for a policy without that panel.
+  liststabs, configtabs
+                  The policy's own tabs, by name, each { def, client }, and on the Config page pending.
+  listscfgheight, itemsheight, adminheight
+                  What the matching Construct answered.
+  createuserdlg   The policy's create user dialog, made the first time Create is clicked while it is active.
+
+There is one window and it is the mod's: konfer.mainwin, with the handful of its widgets other files reach in konfer.qf.
+
+
+10. Platform services a policy calls
+------------------------------------
+
+Configs
+  konfer:PolicyConfig(pol, cfgid) -> cfg        Only this policy's configs. konfer:Config(cfgid) searches every policy.
+  konfer:PolicyConfigs(pol) -> { [id] = cfg }   konfer:PolicyDB(pol), konfer:IsTempCfg(pol), konfer:NumConfigs(pol).
+  konfer:GetPolicy(cfgid) -> pol                The config's policy, nil for a config nobody holds, apol with no id.
+  konfer:PolicyAdmin(pol)                       Whether this character administers the policy's current config.
+  cfg:IsActive()                                The config is the active policy's current one, so loot runs against it.
+  cfg:MyUid(), cfg:MyStatus(), cfg:IsAdmin(uid), cfg:IsCoadmin(uid)
+  cfg:ChangeSetting(which, val, nocmd), cfg:ChangeSettings(tbl)
+                                                The platform's settings, sent as CHSET.
+  konfer:ActivatePolicy(pol)                    Section 1. A policy never calls it on its own account.
+
+Lists
+  cfg:ListChoices() -> dropdown items           "0" for none first, sorted.
+  cfg:FindList(name), cfg:IsInList(uid, listid), cfg:UserOrAltInList(uid, listid) -> inlist, uid, idx
+  cfg:ListPosition(uid, listid) -> pos, raidpos Where UID stands in the policy's Order, and among those in the raid.
+  cfg:CreateRaidList(listid) -> uids            The members in the raid, reserved, or with a tethered alt in the raid.
+  konfer:SplitRaidList(str) -> uids             A string of four character uids back into an array.
+  cfg:InsertMember(uid, listid, pdata, nocmd), cfg:DeleteMember(uid, listid, nocmd),
+  cfg:SetMemberList(ulist, listid, pdata, nocmd)
+  cfg:CreateNewList(name, myid, nocmd, reproduced) -> err, id, cfg:CopyList, cfg:RenameList, cfg:DeleteList
+  cfg:FixupLists()                              Puts tethered lists right.
+  konfer:RefreshAllMemberLists(listid), konfer:RefreshAllLists(reset), konfer:RefreshListsUI(reset), konfer:SelectList(listid)
+
+Users
+  cfg:FindUser(name) -> uid, cfg:UserName(uid), cfg:UserNameClass(uid) -> name, class
+  cfg:IsAlt(uid) -> isalt, mainuid, cfg:UserAlts(uid) -> uids
+                                                The mod's one alt link, as uids in this config.
+  cfg:SetUserIsAlt(uid, onoff, mainuid, nocmd) -> ok, why
+  cfg:IsFrozen(uid), cfg:IsEnchanter(uid), cfg:IsReserved(uid)
+  cfg:SetUserFrozen(uid, onoff, nocmd), cfg:SetUserEnchanter(uid, onoff, nocmd), cfg:ReserveUser(uid, onoff, nocmd)
+  cfg:UserPData(uid), cfg:SetUserPData(uid, pdata, nocmd)
+                                                What the policy keeps about UID. Setting it sends the MDUSR unless NOCMD.
+  cfg:CreateNewUser(name, class, norefresh, bypass, myid, nocmd) -> uid
+  cfg:FindUser(name), cfg:FindKuid(kuid) -> uid    cfg:UserName(uid) -> name    cfg.uids[uid][konfer.CFGUSER_KUID] -> kuid
+  KU:Roles(kuid), KU:Professions(kuid), KU:CreateUserDialog(cfg), KU:CreateSharedUserInfo(cfg, parent) (Kore)
+
+Loot and events
+  cfg:AwardItem(listid, uid, ilink, rlist, chain, nocmd, norefresh, kind, cost) -> moves, ok
+  cfg:UndoAward(uid, ilink, moves, nocmd) -> ok
+  konfer:SelectedLoot() -> idx, loot, open      The item selected on the loot list, and whether a bid or roll is open on it.
+  konfer:OfferLoot(idx)                         Put item IDX on offer as the master looter picking it does, ItemClaim asked
+                                                again: how a policy whose claim was just decided hands the item on.
+  konfer:LootRunner() -> name                   Who runs the group's loot: its master looter, or where the game has none
+                                                the leader collecting it (GroupLoot.lua). Never KRP.master_looter directly.
+  konfer:AmIML()                                Whether this character runs it, and administers the config it runs against.
+  cfg:PolicyCall(method, defval, ...), konfer:PolicyHook(pol, name, defval, fn, ...)
+                                                A call into a policy that cannot take the platform down with it.
+
+Art and UI
+  konfer:PolicyArt(strip, order), konfer:CreateTitleCard(cfg, parent), and all of KoreUI (Kore/UI.txt).
+
+
+11. What the platform does not yet do
+-------------------------------------
+
+What a policy other than Suicide Kings will need and cannot have today.
+
+Decided, not built
+  - Nothing at present.
+
+Undesigned, and not to be inferred
+  - Nothing at present.
+
+Which policy runs loot is the player's to choose. Becoming master looter says how things stand and offers the way to change
+them (konfer:BecameMasterLooter): the foyer where the active policy has no config, which policy is set to hand out loot
+where it has one among others, and nothing where it is the only policy switched on.
+
+
+12. Where the comments in the code are wrong
+--------------------------------------------
+
+  None known.
+
+
+13. Bugs found while surveying
+------------------------------
+
+  None open. Every bug the survey found has been fixed.

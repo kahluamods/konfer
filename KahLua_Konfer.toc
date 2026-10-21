@@ -1,0 +1,21 @@
+﻿## Interface: 120100, 11509, 20506, 38002, 40402, 50504, 16001
+## Title: Konfer Loot Distribution |cffff2222-K-|r
+## IconTexture: Interface\AddOns\KahLua_Konfer\Textures\KonferIcon
+## Group: KahLua
+## Notes: Multi-mode loot distribution system.
+## Author: Cruciformer
+## Version: @revision@
+## X-email: me@cruciformer.com
+## X-Credits: Ace3 development team
+## X-Category: Loot
+## X-License: Apache
+## X-Website: https://www.curseforge.com/wow/addons/konfer
+## X-Curse-Packaged-Version: r@revision@
+## X-Curse-Project-Name: Konfer
+## X-Curse-Project-ID: konfer
+## X-git: git@github.com:kahluamods/konfer
+## SavedVariables: KonferDB
+## RequiredDeps: KahLua, KahLua_Kore
+
+locales\locales.xml
+Konfer.xml

@@ -1,0 +1,40 @@
+<Ui xmlns="http://www.blizzard.com/wow/ui/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.blizzard.com/wow/ui/
+..\FrameXML\UI.xsd">
+
+<Script file="Konfer.lua"/>
+<Script file="Policy.lua"/>
+<Script file="Utility.lua"/>
+<Script file="Comms.lua"/>
+<Script file="Items.lua"/>
+<Script file="Tokens.lua"/>
+<Script file="Config.lua"/>
+<Script file="Users.lua"/>
+<Script file="Lists.lua"/>
+<Script file="Loot.lua"/>
+<Script file="Sync.lua"/>
+<Script file="Options.lua"/>
+<Script file="Raid.lua"/>
+<Script file="GroupLoot.lua"/>
+<Script file="Policies\Points.lua"/>
+<Script file="Policies\Tally.lua"/>
+<Script file="Policies\SK\SK.lua"/>
+<Script file="Policies\SK\Comms.lua"/>
+<Script file="Policies\EPGP\EPGP.lua"/>
+<Script file="Policies\EPGP\Comms.lua"/>
+<Script file="Policies\DKP\DKP.lua"/>
+<Script file="Policies\DKP\Comms.lua"/>
+<Script file="Policies\LC\LC.lua"/>
+<Script file="Policies\LC\Vote.lua"/>
+<Script file="Policies\PUG\PUG.lua"/>
+<Script file="Policies\PUG\Reserves.lua"/>
+<Script file="Foyer.lua"/>
+<Script file="Settings.lua"/>
+<Script file="RaidInfo.lua"/>
+<Script file="CharInfo.lua"/>
+<Script file="Init.lua"/>
+
+<!--@debug-start@-->
+<Script file="SampleHistory.lua"/>
+<!--@debug-end@-->
+
+</Ui>

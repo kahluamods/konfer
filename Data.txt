@@ -1,0 +1,511 @@
+Konfer data model
+=================
+
+This describes where data lives and why, not how any one file happens to be written. Where the code and this file disagree,
+one of the two is wrong and it is worth working out which before changing either.
+
+
+1.  Three homes, and the test for which
+---------------------------------------
+
+Every piece of state in the mod belongs in exactly one of three places, and which one is decidable per variable without
+understanding the code around it.
+
+konfer.*
+  Mod wide and durable. The same for every policy, survives a raid, survives a change of active policy. The saved variables
+  and everything derived from them, the one window, and the handful of that window's widgets other files reach.
+
+konfer.policies[handle].*
+  One per policy. The config that policy currently has in hand, the frames of the panels it contributes to the window's
+  pages, and whatever it works out for itself. An inactive policy still holds all of it, so that switching back to a policy
+  lands where it was left.
+
+konfer.raid.*
+  Exists once because only one raid, under one active policy and its one config, can be running. The loot session,
+  reservations, the undo stack, who has been warned about what, who of the config is here (uidmap), who of the raid the
+  config has never heard of (missing, nmissing), which disenchanters are online (denchers), what is on the corpse
+  (bossloot), and where the game has no master loot, who collects the group's loot and who has consented to it
+  (collecting, collector, consent, consents, asked; GroupLoot.lua). What the collecting leader owes by trade is Kore's,
+  KLD.trades, saved with the character (K.chardb.trades), so that it outlives the raid along with the items in their bags.
+
+The test is "would wiping this when the raid ends be correct?". If yes it is raid state, even though it is saved. If it survives a raid but differs
+per policy it belongs on the policy. If it survives everything and is the same for all policies it stays on konfer.
+
+konfer.raid is one table rather than a scattering of variables so that ending a raid or changing the active policy is
+
+  konfer:EmptyRaid()
+
+and is complete by construction. A field missed out of a dozen separate resets is yesterday leaking into today. A field
+missed out of this one does not exist. It is emptied and never set to nil, because every member is reached as
+konfer.raid.something and much of the mod asks whether one of them is there at all. A change of config in the same group
+keeps what belongs to the group rather than the config: whether becoming master looter has been put to the player, and who
+collects the group's loot with whose consent.
+
+A raid is a group, and the group is the game's. Kore keeps the id the game gives the player's own group (KRP.group_id), which
+the game says only as the group is formed, joined and left, so Kore saves it to know it again after a reload, and forgets it
+the moment the player is found in no group. konfer.raid is that group's record and is saved with it (konfer.chardb.raid),
+so a reload in the same group, or a login back into it after the connection dropped, starts from where it was. A record
+for any other group, or for none, is thrown away, and so is what was on the corpse, a reload having closed the loot window.
+The record is only ever a starting point and never outranks the game: whatever the game says about the group is read from
+the game, whatever is counted from the group is counted again on the next walk of it, and what the raid has agreed is
+asked for again and replaced by the answer.
+
+A policy's own record of a raid that has to outlive the night's group, PUG's +1s and decay and its reserves from softres.it,
+which its co-admins share and its raiders see, is the policy's data on the config and carries the group's id, so that a
+login back into the same group carries on and one anywhere else asks.
+
+Some of these are remembered and some are counted afresh on every walk of the group, and that difference decides nothing
+about where they live. Both are about this raid and both go when it does.
+
+What it does decide is what travels. konfer.raidshared names the keys the whole raid agrees on rather than works out for
+itself, which today is who is reserved and which three are disenchanting. Those are decisions about tonight, so REQRS asks
+for them on joining, and again when the config loot runs against changes, a switch of config or of policy, and ACKRS
+carries the lot. Everything else is derived from this client's own view of the group, and
+sending one client's view to another that can see the group perfectly well itself would be worse than useless. A key
+belongs in raidshared only when it is something somebody decided.
+
+ACKRS carries the whole picture and replaces ours with it, rather than adding two half pictures together. A key the answer
+does not name is cleared, because a reservation left standing only because nobody mentioned it is exactly the bug the other
+way round would have. It is sent whether or not anything is set, since silence would otherwise be indistinguishable from
+nobody having answered and would leave whoever asked holding what was left over from the last raid.
+
+One client answers, not every admin. konfer:RaidSettingsAnswerer picks the highest ranked person in the raid, and every
+client works that out the same way from what it can already see, so nobody has to agree it first. The order is the guild
+master, the config's owner, whoever leads the raid or assists, and last the master looter. konfer:MaySetRaidSetting draws
+the line for changing anything above the master looter: the people who set a raid up did it for whoever ends up running
+loot, and are frequently not in the raid at all to be overruled.
+
+Tonight's disenchanters are konfer.MAX_DENCHERS and never more. They start as the config's and are changed for the night by
+konfer:SetRaidDencher, which does not touch cfg.settings.denchers. Who a config's enchanters are is a config admin's to say;
+who is doing it tonight is the raid's.
+
+uidmap is the one that looks like it might belong elsewhere, because a uid is a config's and means nothing outside the
+config that issued it. It is in here rather than on the config precisely because of that: it maps the raid going on now
+onto the config running it, so it is neither the raid's alone nor the config's, and it is wrong the moment either changes.
+
+
+2.  Configurations
+------------------
+
+Each policy's configs live in its own konfer.frdb[handle].configs, keyed by config id, invisible to every other policy.
+konfer:PolicyDB and konfer:PolicyConfigs reach them. A config id means nothing at mod level, and konfer:Config(cfgid)
+searching every policy is a convenience for code handed a bare id, not the model.
+
+Nothing needs one flat table. A message reaches only the endpoint of the policy that sent it, under that policy's own prefix,
+so the policy a config id belongs to is a fact of its arrival and never a search. The foyer spans policies one at a time, by
+selection, and asks the selected policy for its configs.
+
+Anything taking a config id or a user id is therefore a policy method, pol:Setting(which, cfgid) rather than
+konfer:X(which, cfgid), and mod level code talks about names and asks each policy in turn. The platform services a policy is
+given look their config up within that policy, so a policy handed some other policy's id gets nil rather than an answer.
+
+cfg.policy says which policy a config runs, and is the handle of the policy whose table holds it. It is fixed when the config
+is created and never offered as a choice afterwards, because a config is made from inside a policy and that is what decides
+it. There is no policy chooser anywhere.
+
+Config ids are minted by KC.CreateNewID(extra) in Kore, a CRC over the clock to the second, a counter separating ids issued
+in the same second, the player's own name, and a fourth value the caller supplies. Konfer supplies the policy handle, so two
+policies handed identical clock, counter and player still draw from separate spaces. What a config is called never
+participates. Two admins who both create "Main Raid" are creating two different things and must get two ids.
+
+Three fields of a config are deliberately independent and none is derived from another.
+
+  cfg.policy    which distribution system it runs
+  cfg.channel   where its admins sync, guild or the group
+  cfg.owner     who may rename it, change its channel, or hand it on
+
+cfg.channel is read only by a policy's own CSendAM and CSendChannelAM, which are Konfer's. Kore is a transport and never
+reads a config. In a group CSendAM sends to that group whatever the channel, so everybody raiding together hears the config's
+events and its loot whatever their guild, and another raid of the same guild hears none of it. Out of a group, guild means
+every admin is a guildmate and hears it. The sync request, the users refresh and the loot history broadcast go by the
+channel in a group too (CSendChannelAM). An admin of a group config who is not in that group sees nothing until they are.
+
+A config's loot history is each client's own, raiders' as well as admins', each keeping and trimming it. It travels with no
+config. A row goes to everybody holding the config as it is written (LHADD), and the master looter may broadcast the whole
+of it (LHBCS), at most once every konfer.HISTORY_BCAST_GAP seconds, the receiver adding the rows it does not hold. An admin
+keeps every row and takes a broadcast as it comes. A raider who is no admin keeps rows only where they asked to on the
+Options page (konfer.chardb.recordhistory, per character, off unless they do), it being a great deal to keep unasked, and is
+asked about each broadcast unless they have answered Never (konfer.chardb.ignorehistory, a box on the same page).
+cfg.histsent is when this client last broadcast it, kept on the config so the gap outlasts a reload. One arriving to replace
+a config we hold keeps the history and histsent we had for it, and one never held before starts with none.
+konfer:KeepLocalConfigState is the one place that says so.
+
+Its settings are not each client's own. What a config does is its owner's to decide, so they travel with it, in the c field
+of a broadcast, and replace whatever the receiver had. A change between admins is a CHSET on the event stream carrying the
+whole of them rather than the one that moved.
+
+That is why they are small. A config keeps them as two strings, cfg.opts holding one character per yes-or-no setting and
+cfg.vals the rest with a colon between them, in the order konfer.copts and konfer.cvals declare. That declared order IS the
+storage format, so those two lists are only ever appended to: inserting into one reinterprets every config already saved
+and every one in flight, and a setting that goes away keeps its slot at a cost of one character. A change the format cannot
+absorb by appending is a dbversion convert in Utility.lua.
+
+Nothing outside konfer:MakeConfig knows any of that. cfg.settings is a table with no contents of its own and a metatable
+that reads a character out of one string and writes it back, so a caller still says cfg.settings.auto_bid. A metatable is
+not saved, which is the point of the two strings being real fields, and is also why every config that comes back out of the
+saved variables has to be made an object again before anything reads it. MakeConfig puts the proxy back along with the
+config's own methods, at creation, in konfer:SetConfig for anything arriving from another client, and over the lot at
+startup as konfer:MakeAllConfigs, because a config that missed one reads every setting as nil without saying so.
+
+Two of those settings carry guild rank filtering, which is the platform's and which every policy has. rank_filter says
+whether the config filters by guild rank at all, and rank_order gives each of the guild's ranks a place from 1 to
+konfer.MAX_RANK_ORDER. Ranks sharing a place are equivalent and a filter naming any one of them admits all of them, a
+guild's rank list being an ordering of people by office where a raid wants one by standing, and the two agreeing only by
+luck. A rank the order says nothing about stands at 1, so an order nobody has touched puts the whole guild level and a
+filter run against it admits every member of it. The order is where the guild says which of its ranks outrank which, and
+until somebody says so nothing guesses: reading the rank list as an ordering by standing is the very assumption the order
+exists to replace. Only cfg:RankOrder, RankPermits, NextRank and RankFiltering know the order exists.
+
+A filter itself is not a setting. It lives where it applies: def_rank on a roll list, rank on an item, and the live one the
+master looter holds for the item being distributed, which is neither and is remembered nowhere.
+
+def_list, the roll list a drop is bid on when nothing else names one, is the platform's too, and is edited in the Options
+panel on the Admin tab beside the rank ones. Roll lists are the platform's, so which of a config's lists is the fallback is
+a fact about those lists rather than about how any policy hands things out. It offers the lists of the config the tab has
+selected rather than the one the window has in hand.
+
+A policy's own settings are not in cfg.settings, and like the platform's they are the owner's and travel with the config,
+in the p field of a broadcast beside the two strings in c. konfer.defaults and cfg.settings are the platform's and are the whole list
+of what every policy has; a policy declares its own in its descriptor's defaults, they live in cfg.psettings keyed by its
+handle, and it reads and writes them with pol:Setting and pol:ChangeSetting. A change to one travels as PSSET where a platform setting
+travels as CHSET, and PSSET carries the policy's whole block for the same reason CHSET carries both strings. What is in
+that block is checked against what the policy declares, so a name it has never heard of or a value of the wrong kind is
+dropped and the rest is still taken, and a setting the sender never mentioned lands on its default rather than keeping
+whatever this client had. Two tables and two commands, so that neither side has to know what is in the other's and a policy
+may name a setting whatever it likes.
+
+The block is left named rather than packed into a string the way the platform's is. A positional format is a contract that
+an external policy has to keep, and an author who reordered their own list would silently reinterpret every config they had
+ever saved. Suicide Kings has three settings; the compaction is earned for the platform's thirty and is not earned here.
+
+The block is made from the defaults the first time it is asked for rather than when the config is, so a policy registered
+later, or one that declares a new setting, has it in every config that already existed. Keyed by handle although a config
+belongs to exactly one policy, so that a config which changed hands keeps each policy's answers apart.
+
+Suicide Kings holds suicide_rolls, bid_threshold and try_roll. The last two are edited on the platform's Loot tab,
+because what quality of item is worth distributing and what happens when nobody bids are questions every policy has to
+answer even though the answer is the answering policy's.
+
+A policy's own data on a config is the other thing it keeps there, for what is not a setting: a collection edited an entry
+at a time, EP/GP's and DKP's awards. It declares it in its descriptor's configdata, it lives in cfg.pdata keyed by its
+handle, and it is read with cfg:PolicyData. It is whole only when the config travels whole, in a broadcast, a full sync, a
+recovery or a config copy, checked against what the policy declares as a setting is. Between admins it changes only by the
+policy's own events, one entry each, so PSSET never carries it: a whole block sent for one setting would carry the sender's
+copy of every entry with it and undo an entry another admin had just changed.
+
+A policy's corner of the saved variables, konfer:PolicyDB, holds its configs and which of them it had in hand at logout,
+and may hold beside them whatever else of the policy's belongs to this machine alone and must never travel with a config,
+though no policy keeps anything there at present. Nothing of the platform's reads that or sends it, a broadcast, a sync and
+a copy included: it travels only by the policy's own messages, and those only to whoever it is for.
+
+A policy's own options on a roll list are the same thing one level down. It declares them in its descriptor's listoptions,
+they live on the list in rl.poptions keyed by its handle, and it reads them with pol:ListOption. They are edited on the
+Lists page's Config tab beside the list's own options and travel with them: the tab's one CHLST carries the policy's whole
+block after the platform's fields, a config travelling whole carries it in each list's row, and a config copy carries it.
+What arrives is checked against what the policy declares, as a setting is, and an option the sender left out lands on its
+default. A copied list has them because a copy is the whole list.
+
+A config's checksum is a running XOR over its event stream rather than a hash of its contents, so adding storage is sync safe
+provided every mutation goes through AddEvent. Which also means the fold and the event have to happen together: an event
+folded in and then dropped leaves two admins with matching event ids and different checksums, and nothing recovers from that
+but a full sync.
+
+
+3.  Users, lists and standings
+------------------------------
+
+What is true of a character is Kore's, what a config thinks of them is that config's, and what a player privately thinks of
+them is that player's and never leaves the machine.
+
+K.frdb.users, read as KU.users, holds every character this faction and realm knows about, keyed by the canonical
+Name-Realm. It is Kore's rather than this mod's because a character's class, race, level, specs and professions are facts
+about the game's own characters and are the same facts whichever mod asked, so every KahLua mod on the client reads and
+writes the one table rather than each keeping a copy that drifts. A record is a positional array through the USER_
+constants, documented in Kore/UserDB.lua, and its first slot is the character's KUID. The role a character plays is not
+stored at all, being what their spec plays.
+
+One thing on that record is the player's own opinion rather than fact, and it is never sent: their notes, ratings included.
+Everything the game itself can prove travels as the WUSER_ wire row, and is offered rather than written when it arrives,
+a sender being able to be honestly wrong about any of it.
+
+A config keeps cfg.uids[uid], positional through the CFGUSER_ constants, documented in Konfer.lua. The KUID reaches the
+character's record and everything after it is this config's own view of that user, whether they are a raid enchanter here,
+whether their place on these lists is frozen, and pdata, whatever the config's policy keeps about them, which the platform
+stores and sends whole and never looks inside. The four hex uid CreateNewUser allocates is an admin id prefix plus a
+sequence, so admins who are offline from each other cannot collide, and that scheme only works because a config has a
+defined admin list to allocate from. One character in two configs has two entries and two uids, and one record.
+
+A person has three names, and each is for one thing. The Name, the canonical Name-Realm, is the game's and is all two
+clients share about somebody when no config is in common. The KUID is this client's own: four hex digits Kore issues from
+K.frdb.nextkuid, never used twice, and never sent anywhere. Kore keys its records by Name and holds the KUID in each, and
+KU.kuids turns a KUID back into the Name, rebuilt at login and never saved. The uid is a config's: issued by one of its
+admins and the same in every copy of it, while each copy's entry points at its own client's KUID. So two clients that number
+the same people quite differently still agree on every uid, and that agreement is all their traffic needs.
+
+Everything about a person, Kore's record, the notes, the ratings and the alt link, is keyed by KUID, and so a rename moves
+the record's key and touches nothing that points at it. Everything about a config, its lists, standings, admins, bidders,
+rollers, reservations, disenchanters, the loot history, the undo stack and every event on the wire, is keyed and compared by
+uid. A character name appears only where something outside insists on one: a game API, a whisper, an announcement in chat,
+a line on screen, and another client. Each of those turns a name into a KUID or a uid at the doorway, KU:Find, KU:Add and
+cfg:FindUser, and never carries one further in. A config arriving whole names its people by Name, there being nothing else
+the two clients share, and they become this client's KUIDs only as it is accepted, so a config refused adds nobody. Two
+tables are keyed by name on purpose, konfer.raid.missing and the warning sets beside it, because what they hold is
+precisely the people the config has issued no uid for.
+
+There is one alt link and it is a fact. A human has one main and every other character of theirs is an alt of it, so the
+link is one level deep and is the same wherever that person appears. Nobody is an alt in one raid and a main in the next,
+and anybody wanting two mains simply does not link them. It lives once, in USER_ALTOF and USER_ALTS as KUIDs, written only
+by KU:SetMain. Nobody is their own alt, nobody is an alt of an alt, and somebody who already has alts cannot become one,
+and that one function is the only place those rules exist. A config carries no link of its own.
+
+The link is not a fact the game can prove and it is not an opinion either. It is what the people running a raid say about
+the human behind two characters, so it is neither in the WUSER_ row nor offered. It travels beside that row, in CHUSR 'A',
+MDUSR and each user's row in a broadcast or a sync, and a receiver writes it as it stands.
+
+The two config events carry a uid and a broadcast carries a character name, because they are answering different questions.
+CHUSR 'A' and MDUSR happen inside a config both ends hold, where the main must be a member for anything to be done about
+them. A whole config arriving may name an alt whose main that config has never held, which a uid cannot express, so the
+user row carries the name and the broadcast's m table carries the wire row for any such main. They arrive as people, with
+no uid and no membership. Neither ever carries a KUID.
+
+Only one thing clears a link, CHUSR 'A' with onoff false, which is an admin unlinking somebody by hand. Everywhere else an
+empty main is silence rather than a denial. MDUSR's flag comes from cfg:IsAlt, which answers only about mains this config
+holds, so a false there says the sender could not see one and never that there is none.
+
+What a config supplies is the uid it knows a character by. cfg:IsAlt and cfg:UserAlts read the one link and answer in
+that config's uids, and that is what tethering, suicides and awards run on. Marking somebody an alt needs their main to be
+in that config, which is why cfg:SetUserIsAlt takes uids for both and why the Users page offers that config's mains and
+no others. Kore's editor has no config in hand and offers every main there is.
+
+A character whose main is not in a config stands as a main in that config, and is still that main's alt everywhere, the
+link being untouched. Adding the main to the config is all it takes for the two to tether there.
+
+Nobody is added passively. Creating a config, creating a user, importing the guild, adding who is missing from the raid, and
+accepting a broadcast or a sync are the only ways a character arrives. What another admin says about a character already
+known is an offer, put to the player one tick per user in Kore/UserOffers.lua, and a refusal is not remembered, the
+comparison always being against what is stored. Somebody who will not stop asking is K.frdb.blockedsenders, and then nothing
+they broadcast is even unpacked. A character's own answer about itself is the exception and is taken as it stands, that being
+the one answer nobody has to be asked about.
+
+A user outlives every config that has them, and is only ever forgotten deliberately, in Kore's user editor, once no config
+has an entry for them. Kore knows nothing about configs, so it asks: KU:RegisterConsumer registers UserConfigs, which is
+what refuses a delete, and Konfer answers it by walking its policies. A rename asks nothing, every config's entry pointing
+at the KUID the rename leaves alone.
+
+Whether an award belongs to the human or to the character is the list's tethering rather than a shared fact about a player.
+A tethered list holds mains, so what is won or earned on it is the person's; on one that is not, each character stands on
+its own.
+
+Standings are per list, never per config. The ordered rl.users array is canonical, and for Suicide Kings the index in it is
+the standing. Policies that need numbers use the platform owned rl.standings beside it, keyed by uid, with the fields the
+policy declared in StandingFields. Created on demand rather than by a database upgrade, the checksum being over the event
+stream and not over the contents.
+
+What a policy did to a list's numbers that the loot history does not record, EP/GP's and DKP's awards of points and their
+decays, and DKP's zero-sum shares of what a winner spent, is rl.journal, beside the standings. The platform keeps it with
+the list and never reads it, and a copied list has it because a copy is the whole list under another name. The policy
+fills it from its own events, so every admin's copy is filled alike, and carries it in its ListInfo for a config that
+travels whole. Both keep every decay and a month of everything else, each naming the admin who made it and the uids it
+reached, and show them on the Lists page's Journal tab.
+
+When a list was last decayed is EP/GP's and DKP's rl.lastdecay, beside the journal and carried the same way, set by the
+decay event on every admin alike. It is what says when the list may be decayed again, once in five days, and it is a field
+of its own rather than read out of the journal, which is a record to show and not a rule to go by.
+
+Beside each member's numbers in rl.standings, EP/GP and DKP keep that member's lifetime totals on the list: earned, everything
+awarded, penalties taking it down; charged, everything charged for loot, an undone charge taking it back; and decayed_<field>,
+what decay has taken off each number that decays. Nothing decays them, and only awards, charges and decay move them; numbers
+set by hand, or brought by somebody put on a list, move the numbers alone. They are a list's, so a config's Friday run is kept
+apart from its main raid by being a list of its own, and they travel with the numbers wherever those do, in IMLST and in a
+config travelling whole. Every admin moves them from the same events, which is why they agree.
+
+A decay event carries any base a number decays towards, EP/GP's base GP, as the admin who decayed held it, so that an admin
+holding another base still decays alike. Base GP itself is kept out of the stored GP, which decays as GP plus the base would,
+less the base and never below nothing: the original EP/GP's decay without the base being stored.
+
+Roll lists, their membership, filters, rank restrictions, alt tethering and extra list are platform. Only the ordering
+semantics layered on top belong to a policy.
+
+
+4.  Policies
+------------
+
+A policy is not an addon. It registers a descriptor with konfer:RegisterPolicy() and is keyed in konfer.policies by its
+handle. Policy.lua documents the descriptor in full.
+
+The handle is the policy's identity in four ways at once. It is what cfg.policy stores, what keys konfer.policies, the prefix
+on every frame the policy owns, and the tail of its prefix on the wire. pol.prefix is derived from it as handle .. "_" at
+registration rather than declared, so a policy cannot ship a prefix that disagrees with its handle or forget one, and a
+duplicate handle is an error at registration rather than a silent overwrite. It is the handle and never the command, because
+a command is what a user types and is subject to translation.
+
+Registration happens at load, and every policy registers whether or not it is switched off, so the engine knows all of them
+and can resolve any config's policy.
+
+Its panels are built separately, by konfer:BuildPolicyUI(pp), which guards twice: a policy that is switched off builds
+nothing, and one already built hands back what it has, so a caller may be careless and call it as often as it likes. When
+that happens is konfer.EAGER_POLICY_UI. Lazily, on first activation, is what ships, and a policy nobody switches to costs
+nothing at all. Eager is for development, so that a fault in a policy's Construct shows up at login rather than weeks later.
+
+Building is deferred rather than done at load because WoW cannot destroy a frame. Panels built for a policy the user has
+switched off would sit there for the rest of the session, and switching one back on has to hand back the frames it already
+made rather than leak a second set.
+
+A policy owns presentation and ordering. It gets no private database namespace and no wire protocol of its own, though it
+does own which events it answers and the prefix they arrive under. Suicide Kings, EP/GP and DKP are views over one shared
+model and differ in how the guild is asked to think about list order, not in what is stored.
+
+Where the platform calls into a policy it goes through konfer:PolicyCall, which returns the platform default for a method
+the policy does not implement and reports once per method per session for one that raises. An incomplete or broken policy
+degrades rather than breaking loot distribution for everybody, which is the discipline Kore applies to addon callbacks with
+safecall.
+
+
+5.  Switched off policies
+-------------------------
+
+A policy that is switched off is still loaded, still registered, and GetPolicy still resolves its configs. Forgetting which
+policy governs a config would lose the data rather than shelve it, which is the opposite of what switching one off means.
+
+Its configs are never removed unless instructed. They are ignored.
+
+Ignored means ignored everywhere it is observable. The foyer does not list the policy so its configs cannot be reached, its
+slash command refuses and says where to switch it back on, and comms drops messages naming one of its configs at the
+dispatch gate, before any handler sees them, so a switched off policy costs no bandwidth and writes nothing.
+
+Two scans deliberately do not filter. Name uniqueness checks every config including shelved ones, or re-enabling one turns up
+a duplicate name. Database validation and upgrade walk every config, or a shelved one comes back broken.
+
+A policy that is switched off can never be the active one at startup, so where the one remembered is off, the first policy
+still on takes its place.
+
+
+6.  The active policy
+---------------------
+
+Exactly one policy is active, and konfer.apol is that policy object, with its current config at konfer.apol.cfg and the id at
+konfer.apol.currentid. Those two are one fact in two fields and are written only by konfer:SetPolicyCurrent, which is what
+keeps them from disagreeing.
+
+Active means two things and they always travel together. It is the policy the window is showing, and it is the policy that
+arms for loot against whichever config it has in hand. Which policy it is is a mod level decision and a policy gets no say in
+it.
+
+konfer:ActivatePolicy is the only thing that changes it, and every route to a switch goes through there. It puts the outgoing
+policy away before it sets the incoming one up, so the two never have their panels on screen together, and it refuses
+outright while loot is being handed out, there being no wording that makes abandoning a distribution halfway a reasonable
+thing to click through. The refusal is there rather than at the routes because one of them, the foyer's Activate, asks
+nothing first by design, and a switch nobody was asked about is still a switch.
+
+A policy is told it has become or stopped being the active one through its descriptor's OnActivate(onoff), and through
+nothing else. Only the two policies it changes for are told. Walking the registry would say the same fact five times and
+make four policies work out from an argument that nothing about them has changed.
+
+Deactivation is not being switched off. An inactive policy stays registered on the wire, still takes broadcasts and sync, and
+still owns its configs and its standings. It is simply not on screen and does not arm for loot, so OnActivate(false) must not
+throw away anything a switch back needs.
+
+There is no mod wide current config. A current config is meaningful only inside a policy, and an inactive policy goes on
+holding the one it last had so that switching back lands where it was left. cfg:SetDefault sets a policy's current
+config and nothing else, with one settled exception: while the active policy has no config at all, a policy that gains or
+picks one becomes active. That cannot yank the window out from under anybody, because a policy with no config refuses to open
+at all.
+
+
+7.  Windows
+-----------
+
+There are exactly two windows, plus the settings and user editor dialogs. The foyer, and the policy window, konfer.mainwin,
+frame KonferMainWin. Only one of the two is up at a time and showing either puts the other away.
+
+There is one policy window and it shows the active policy. Exactly one policy is active, so a second window could only ever
+show what the first one already does, and five of them was five copies of every page in the mod with one of them ever in use.
+The window is the mod's, built once by konfer:InitialiseMainWindow.
+
+The foyer is the mod as a whole and is the one piece of UI that spans policies, which it does one at a time by selection.
+Clicking a policy card fills the top right with only that policy's configs and puts the policy's description at the top of
+the bottom right, and selecting one of those configs fills the rest of it with only that config: the platform's box for each
+of its lists, or whatever the policy draws itself through PopulateBannerInfo.
+
+The pages, Lists, Raid, Loot, Users, Sync, Config and Options, are therefore the mod's and are built once. What a policy
+contributes is panels within those pages, through the descriptor hooks ListsPage, RaidPage, ItemsPage, UsersPage and
+CreateConfigUI, and only the
+active policy's are shown. Each page keeps a slot for them; a policy's frames go in it, hidden, and the slot is sized and
+titled per policy as one comes up. What is genuinely common the platform builds and a policy adds its own beside it. There is
+no forced template and no assembling of one tree from many policies.
+
+Widget handles live in one table per page file, plus konfer.qf for the handful of the window's widgets that other files
+reach. They are the window's and not a policy's, because there is one window. A policy's own frames hang off the policy,
+pp.listsframe and the rest, because that is what they belong to.
+
+A scroll list row, or any callback built once and run later, reads konfer.apol when it runs. A policy captured at build time
+is whichever policy happened to be active then, and the window outlives that. The same goes for a policy's own vocabulary:
+pol:Str() is asked when the words are put on screen, not when the frame holding them was made.
+
+Frame names are prefixed with the handle for everything a policy builds. Everything KUI derives from a window's name follows
+automatically once the window is named, so pages, tabs, content frames, topbars and unnamed splits cost nothing. Explicit
+names, which is every dropdown, scroll list, hand named split, dialog and scroll list item button, take the prefix
+themselves. Two collisions there are silent rather than loud, because KUI.ddframes caches a dropdown's menu by name and
+scroll list item buttons are recycled by name.
+
+
+8.  The wire
+------------
+
+Two things are versioned independently and a bump of one must never force a bump of the other.
+
+KC.WIRE_VERSION is the envelope, the framing, checksum and serialisation. It is Kore's, shared by every Kore addon, and is
+the version letter every message starts with, upper case when the payload was compressed. Nothing ever parses past a
+version letter it does not implement.
+
+konfer.protocol is the addon's events and their arguments. It is one flat number. Policies ship inside Konfer so both ends of
+a conversation update together, and there is nothing for compatibility code to bridge. A message from a higher protocol than
+ours is refused and tells us we are out of date. Anything at or below is accepted.
+
+Every policy is its own endpoint, and so is the mod, all under the mod's one prefix, KONFER. Every message's payload begins
+with the protocol, the endpoint that sent it (a policy's handle, or * for the mod), the command and the config it is about,
+and the mod's dispatcher routes on the endpoint, so Suicide Kings is handed only Suicide Kings messages. None of that is
+Kore's, which carries a payload it never looks into. A policy sends its own messages, and the mod's own SendAM carries only
+the mod's own.
+
+Which events a policy answers is its own. RegisterPolicy gives every policy its own copy of the standard immediate and
+recorded handler sets, copied at registration rather than left to the policy because a policy that forgot would answer
+nothing at all, and the policy's own Comms.lua then adds, replaces or removes entries without touching anybody else's.
+
+Event names stay the policy's. SULST and SUNDO, not AWARD. An award means something different in every policy and carries
+different arguments, so a shared name is a collision waiting for the second policy that needs one.
+
+konfer.BCAST_VERSION versions a config broadcast, which is a whole config in one message rather than an event. A receiver
+reads it to decide whether it understands the message at all, and never decodes one shape as though it were another.
+
+Nothing arriving is trusted to be well formed. A message names its own admins, its own lists and its own users, and a field
+pointing at something the same message did not name is a message that disagrees with itself. It is dropped rather than
+followed, because the thing it points at is exactly what cannot be invented.
+
+
+9.  Loot
+--------
+
+Konfer decides, Kore delivers. Any assumption that an item can be assigned belongs in KLD. Konfer's vocabulary is who should
+get an item, never how it reaches them. Which is how retail gets a Konfer at all, there being no master looter there and loot
+landing in somebody's bags for them to trade.
+
+Deciding and delivering are two events and delivery can fail. An award is never modelled as instantaneous or certain. The
+descriptor's Award, undo token and UndoAward contract is what expresses this. A trade that never happens is an undo.
+
+A win is decided once: when bids close or a roll ends with a winner, or when the master looter goes through with an item's
+own instructions, and in a policy with costing when they pick the charge in the costing box. The award, its history row and
+the announcement are written then, and stand whether or not the item then arrives. The item leaves the loot list whatever
+becomes of it. Where the game is asked to hand it over, it leaves when the game says the slot has cleared, because the game
+answers nothing when asked and a winner with full bags or out of range simply never receives it.
+
+Authority to run loot is being an admin of the config, never KRP.is_ml. The master looter check may gate delivery. It must
+never gate a decision.
+
+The order the loot is in is the order the loot window shows it. KLD hands its items to a consumer in loot slot order and
+Konfer's list follows, so that what the master looter is reading and what they are clicking agree.
+
+How bidders are ranked is the policy's, through RankBidders in its descriptor, and a policy that keeps numbers breaks its own
+ties. For Suicide Kings bidders are ordered by position on the list and nothing else. Where a bidder stands is the whole of
+what it has to say about who should win, so there is nothing to break a tie with and no tie to break, because two people
+cannot occupy one position.
