@@ -2624,6 +2624,34 @@ function konfer:CloseAllWindows()
 end
 
 --
+-- Put the mod's own windows away while a question of its own stands alone on the screen, and answer which went, for
+-- konfer:WindowsBack to bring back once it has gone.
+--
+local function away_if_shown(away, win)
+  if (win and win:IsShown()) then
+    win:Hide()
+    tinsert(away, win)
+  end
+end
+
+function konfer:WindowsAway()
+  local away = {}
+
+  away_if_shown(away, self.foyerwin)
+  away_if_shown(away, self.mainwin)
+  away_if_shown(away, self.settingswin)
+  away_if_shown(away, KU.usereditwin)
+
+  return away
+end
+
+function konfer:WindowsBack(away)
+  for _, win in ipairs(away or {}) do
+    win:Show()
+  end
+end
+
+--
 -- Start or stop hearing anything at all. One prefix carries the whole mod, policies included, so this is one subscription
 -- and giving it up takes every policy's traffic with it, which is what suspending the mod means.
 --

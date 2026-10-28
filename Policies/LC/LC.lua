@@ -105,6 +105,7 @@ local lc = {
     HELP_STANDING = L["TALLY_HELP_STANDING"],
     RAID_BROADCAST = L["TIP_LC_BROADCAST"],
     RAID_REMOVE = L["TALLY_REMOVE"],
+    RAID_REMOVE_MANY = L["TALLY_REMOVE_MANY"],
   },
 
   StandingFields = {},

@@ -409,11 +409,13 @@ local policies = konfer.policies
 --                              kuid, and uid, nil for somebody the config does not hold.
 --                   buttons    The policy's own buttons on the page's second row, in the order they stand, the platform's
 --                              Remove among them where the string "remove" is and last where it is not. Each a table of
---                              name, text and tip, Enabled (cfgid, raider, admin) -> whether it is lit for RAIDER, the
---                              raider picked or nil, ADMIN being whether this character is one of the config's, and Click
---                              (cfgid, raider). Each is built once and kept as pol.raidbuttons[name]. PUG's Penalty, Reward
---                              and End raid. Optional.
---                   Removed    (cfgid, uid) the raider UID, whom the config holds, was taken out of the group with Remove.
+--                              name, text and tip, Enabled (cfgid, raiders, admin) -> whether it is lit for RAIDERS, the
+--                              rows it acts on (everybody ticked whom the role filter shows, or with nobody ticked the
+--                              raider picked, or none), ADMIN being whether this character is one of the config's, and
+--                              Click (cfgid, raiders). Each is built once and kept as pol.raidbuttons[name]. PUG's
+--                              Penalty, Reward and End raid. Optional.
+--                   Removed    (cfgid, uid) the raider UID, whom the config holds, was taken out of the group with Remove,
+--                              or with Selected's Remove, once for each.
 --                              PUG forgets what tonight counted against them. Optional.
 --
 --                 Its words on Broadcast's tooltip and in Remove's question are the policy's to change (Strings). EP/GP shows
@@ -960,9 +962,11 @@ local policy_words = {
   -- The heading over where each member stands in the Lists page's member list, PositionText's column.
   MEMBERS_STANDING = L["Pos"],
 
-  -- The Raid page's Broadcast tooltip, what a broadcast takes to the raid, and Remove's question before a raider goes.
+  -- The Raid page's Broadcast tooltip, what a broadcast takes to the raid, and Remove's question before a raider goes, and
+  -- before several do.
   RAID_BROADCAST   = L["TIP_RAID_BROADCAST"],
   RAID_REMOVE      = L["RAID_REMOVE"],
+  RAID_REMOVE_MANY = L["RAID_REMOVE_MANY"],
 }
 
 --

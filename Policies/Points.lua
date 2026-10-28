@@ -82,6 +82,9 @@ local GetDifficultyInfo = GetDifficultyInfo
 --              EP/GP's GP towards base GP (ApplyDecay). Nil for none
 --   decayswitch the setting that turns decay on, for a policy where decaying at all is the config's choice. A policy that
 --              names none always decays
+--   floors     (cfgid) -> { field = least }, for each number that never falls below some amount, EP/GP's EP and DKP's
+--              balance below nothing unless the config lets it go negative: a penalty bigger than what a member has, or a
+--              number set by hand below it, leaves them at the least. Nil for none
 --   events     the policy's names for the seven events sent here: award, set, decay, timer, timerq, awset and awdel
 --   clm        what a Classic Loot Manager roster of this policy's kind is, for importing one: { type = CLM's point type,
 --              numbers = function(player, config) -> the player's FIELDS }, PLAYER and CONFIG being an exported player
@@ -764,23 +767,43 @@ end
 -- tethered list are mains. The sender works out who is who from what it can see of the group, and every other admin applies
 -- that rather than their own view of it.
 --
+-- A penalty that meets a number's floor (Floor) takes off only what the member had, and their lifetime total loses the same.
+--
+
+-- The least the number F may be on CFGID, from the spec's floors, nil for no least at all.
+function P:Floor(cfgid, f)
+  local floors = self.points.floors and self.points.floors(cfgid)
+
+  return floors and floors[f]
+end
+
+-- V, or LEAST where V is below it.
+local function at_least(least, v)
+  return least and max(least, v) or v
+end
+
 function P:ApplyAward(cfg, listid, when, amount, raid, sbamount, standby, reason, by, norefresh)
   if (not cfg.lists[listid]) then
     return
   end
 
   local earn = self.points.earn
+  local least = self:Floor(cfg.id, earn)
+
+  local function give(uid, n)
+    local st = self:Standings(cfg.id, listid, uid)
+    local was = st[earn] or 0
+
+    st[earn] = at_least(least, was + n)
+    points.Earned(st, st[earn] - was)
+  end
 
   for _, uid in ipairs(raid) do
-    local st = self:Standings(cfg.id, listid, uid)
-    st[earn] = (st[earn] or 0) + amount
-    points.Earned(st, amount)
+    give(uid, amount)
   end
 
   for _, uid in ipairs(standby) do
-    local st = self:Standings(cfg.id, listid, uid)
-    st[earn] = (st[earn] or 0) + sbamount
-    points.Earned(st, sbamount)
+    give(uid, sbamount)
   end
 
   -- Those on standby received it only if their share came to anything.
@@ -1040,7 +1063,7 @@ function P:ApplySet(cfg, listid, uid, vals, norefresh)
   local st = self:Standings(cfg.id, listid, uid)
 
   for i, f in ipairs(self.points.fields) do
-    st[f] = tonumber(vals[i]) or st[f] or 0
+    st[f] = at_least(self:Floor(cfg.id, f), tonumber(vals[i]) or st[f] or 0)
   end
 
   if (not norefresh and cfg:IsActive()) then

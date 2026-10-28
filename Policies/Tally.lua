@@ -224,8 +224,8 @@ end
 -- them, a column of its own for each thing the config counts: one for the raider, headed with the kind of raid, or one for
 -- each category it counts by whose rolls the Loot tab takes. A simple raid counts nothing and has none. The list starts
 -- sorted the way the raid wants seeing, by name in a simple raid, and otherwise the least penalised first. Under it Penalty
--- and Reward are about what tonight has cost the raider picked, and End raid ends the raid, the platform's Remove standing
--- between them. Its title names the kind of raid the config runs, a simple raid's being plain.
+-- and Reward are about what tonight has cost those ticked, or else the raider picked, and End raid ends the raid, the
+-- platform's Remove standing between them. Its title names the kind of raid the config runs, a simple raid's being plain.
 --
 
 --
@@ -497,10 +497,32 @@ local RAID_TITLES = {
 }
 
 --
--- Penalty and Reward want an admin and somebody the config holds in a raid that counts, with room to go up or down. End raid
--- is the config's admins', while there is a raid to end, and asks first. Removing somebody forgets what tonight counted
--- against them.
+-- Penalty and Reward want an admin and, among the raiders they act on, somebody the config holds in a raid that counts, with
+-- room to go up or down, and move everybody who has. End raid is the config's admins', while there is a raid to end, and
+-- asks first. Removing somebody forgets what tonight counted against them.
 --
+local function any_raider(pol, cfgid, raiders, admin, test)
+  local cfg = konfer:PolicyConfig(pol, cfgid)
+
+  for _, r in ipairs(raiders) do
+    local points = raider_points(pol, cfg, r, admin)
+
+    if (points and test(points)) then
+      return true
+    end
+  end
+
+  return false
+end
+
+local function step_raiders(pol, cfgid, raiders, dir)
+  local cfg = konfer:PolicyConfig(pol, cfgid)
+
+  for _, r in ipairs(raiders) do
+    step_penalty(pol, cfg, r, dir)
+  end
+end
+
 local function raid_page(pol, solo)
   local page = {
     solo = solo or nil,
@@ -520,30 +542,27 @@ local function raid_page(pol, solo)
 
     buttons = {
       { name = "penaltybtn", text = L["Penalty"], tip = L["TIP_TALLY_PENALTY"],
-        Enabled = function(cfgid, raider, admin)
-          local cfg = konfer:PolicyConfig(pol, cfgid)
-          local points = raider_points(pol, cfg, raider, admin)
+        Enabled = function(cfgid, raiders, admin)
+          local most = pol:Setting("max_penalties", cfgid)
 
-          return points ~= nil and points < pol:Setting("max_penalties", cfgid)
+          return any_raider(pol, cfgid, raiders, admin, function(points) return points < most end)
         end,
-        Click = function(cfgid, raider)
-          step_penalty(pol, konfer:PolicyConfig(pol, cfgid), raider, 1)
+        Click = function(cfgid, raiders)
+          step_raiders(pol, cfgid, raiders, 1)
         end },
       { name = "rewardbtn", text = L["Reward"], tip = L["TIP_TALLY_REWARD"],
-        Enabled = function(cfgid, raider, admin)
-          local points = raider_points(pol, konfer:PolicyConfig(pol, cfgid), raider, admin)
-
-          return points ~= nil and points > 0
+        Enabled = function(cfgid, raiders, admin)
+          return any_raider(pol, cfgid, raiders, admin, function(points) return points > 0 end)
         end,
-        Click = function(cfgid, raider)
-          step_penalty(pol, konfer:PolicyConfig(pol, cfgid), raider, -1)
+        Click = function(cfgid, raiders)
+          step_raiders(pol, cfgid, raiders, -1)
         end },
       "remove",
       { name = "endbtn", text = L["End raid"], tip = L["TIP_TALLY_ENDRAID"],
-        Enabled = function(cfgid, raider, admin)
+        Enabled = function(cfgid, raiders, admin)
           return admin and raid_of(pol, konfer:PolicyConfig(pol, cfgid)).started ~= nil
         end,
-        Click = function(cfgid, raider)
+        Click = function(cfgid, raiders)
           local cfg = konfer:PolicyConfig(pol, cfgid)
 
           if (cfg) then

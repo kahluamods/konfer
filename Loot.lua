@@ -7879,6 +7879,44 @@ function konfer:AddLoot(ilink, nocmd, price)
 end
 
 --
+-- The master looter Alt-clicking an item they carry, with the policy window up, puts it on the loot list, as addloot does,
+-- for the items a raid saves up to hand out later. Without the policy window up an Alt-click is left to whatever else gives
+-- it a meaning. The bags' item buttons, the game's and every bag addon's, hand a modified click to
+-- the game's HandleModifiedItemClick, which is followed here. That is called for an item clicked anywhere, a link in chat
+-- or the character sheet among them, so only an item in the bags counts, and only one that could be handed on: a soulbound
+-- item is refused unless the time the game allows for trading raid loot is still running (KLD.TradeableInBags). Nothing is
+-- done while the mailbox, a merchant, the bank, the auction house, the guild bank or a trade is open, where other addons
+-- give Alt-click a meaning of their own.
+--
+function konfer:ItemAltClicked(ilink)
+  if (not ilink or GetMouseButtonClicked() ~= "LeftButton" or not IsAltKeyDown() or IsShiftKeyDown()
+    or IsControlKeyDown()) then
+    return
+  end
+
+  local cfg = self.apol and self.apol.cfg
+  if (not (self.mainwin and self.mainwin:IsShown()) or self:IsSuspended() or not cfg or cfg:IsDenied()
+    or not self:AmIML()) then
+    return
+  end
+
+  for _, name in ipairs({ "MailFrame", "MerchantFrame", "BankFrame", "AuctionFrame", "AuctionHouseFrame", "GuildBankFrame",
+    "TradeFrame" }) do
+    if (_G[name] and _G[name]:IsShown()) then
+      return
+    end
+  end
+
+  if (KLD.TradeableInBags(ilink)) then
+    self:AddLoot(ilink)
+  end
+end
+
+hooksecurefunc("HandleModifiedItemClick", function(ilink)
+  konfer:ItemAltClicked(ilink)
+end)
+
+--
 -- Put an award back. MOVES is what the policy's Award handed back, one { listid, token } per list it moved, and only that
 -- policy knows what is in a token. Each list is put back newest first, the reverse of the order the award made them in, and
 -- taken out of MOVES as it is.

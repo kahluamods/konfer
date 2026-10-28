@@ -268,7 +268,8 @@ Raid page
               The list is built once with every policy's columns, so a policy declares all it may ever show in columns,
               and Columns answers which show for a config and which the list starts sorted on. Row answers a number for
               each. The policy's buttons stand on the second row under the list, the platform's Remove among them. Broadcast's
-              tooltip and Remove's question are words of the policy's own (Strings: RAID_BROADCAST, RAID_REMOVE).
+              tooltip and Remove's question are words of the policy's own (Strings: RAID_BROADCAST, RAID_REMOVE, and
+              RAID_REMOVE_MANY for the Selected dropdown's Remove taking more than one).
 
               EP/GP shows EP, GP and PR and DKP the balance, on the list being worked on (CurrentList), and PUG what
               tonight has cost each raider, with Penalty, Reward and End raid, keeping the page up out of a group.

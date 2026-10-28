@@ -191,25 +191,11 @@ local asking = nil
 local away = nil
 
 local function stand_aside()
-  if (away) then
-    return
-  end
-
-  away = {}
-
-  for _, win in ipairs({ konfer.foyerwin, konfer.mainwin, konfer.settingswin, K.Users.usereditwin }) do
-    if (win and win:IsShown()) then
-      win:Hide()
-      tinsert(away, win)
-    end
-  end
+  away = away or konfer:WindowsAway()
 end
 
 local function come_back()
-  for _, win in ipairs(away or {}) do
-    win:Show()
-  end
-
+  konfer:WindowsBack(away)
   away = nil
 end
 

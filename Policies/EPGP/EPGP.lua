@@ -141,6 +141,9 @@ points:Setup(epgp, {
   earn = "ep",
   charge = "gp",
   decays = { "ep", "gp" },
+  floors = function(cfgid)
+    return { ep = 0 }
+  end,
   -- GP decays towards base GP, as the original EP/GP's did, so decay leaves alone the priority of anybody above it.
   decaybase = function(cfgid)
     return { gp = tonumber(epgp:Setting("base_gp", cfgid)) or GP_BASE }

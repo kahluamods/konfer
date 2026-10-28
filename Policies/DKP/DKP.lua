@@ -146,6 +146,11 @@ points:Setup(dkp, {
   charge = "dkp",
   decays = { "dkp" },
   decayswitch = "use_decay",
+  -- A penalty or a balance set by hand never takes it below nothing unless the config lets it go negative. Loot charges
+  -- are not held to it (ApplyCharge).
+  floors = function(cfgid)
+    return (not dkp:Setting("negative", cfgid)) and { dkp = 0 } or nil
+  end,
   events = { award = "DKAWD", set = "DKSET", decay = "DKDEC", timer = "DKTIM", timerq = "DKTRQ", awset = "DKAWS",
     awdel = "DKAWX" },
   -- CLM's DKP rosters, its point type 0, give what each member holds as points.
@@ -478,7 +483,9 @@ end
 
 --
 -- DELTA added to UID's balance on LISTID: a charge is negative, and one put back positive. What they have been charged in
--- their lifetime moves the other way.
+-- their lifetime moves the other way. A charge is never held at the balance's floor: a bid cannot be for more than the
+-- bidder holds (MayBid), and a roll, an item handed out by its instructions, a cost of the master looter's or the extra
+-- list's charge that comes to more leaves a debt.
 --
 function dkp:ApplyCharge(cfg, listid, uid, delta, norefresh)
   local st = standings(cfg.id, listid, uid)

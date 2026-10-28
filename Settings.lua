@@ -788,9 +788,10 @@ end
 -- and Foyer opens the foyer to choose another.
 --
 -- Before any of that, where an addon that also hands out loot is running, Konfer offers to suspend itself, two of them
--- answering one corpse being a muddle nobody wants: yes suspends it and asks nothing more, and no goes on to the rest. All
--- of it is asked once a group (konfer.raid.mlasked), nothing is asked of a suspended Konfer, and none of it while either of
--- Konfer's windows is already up. It is asked in turn (konfer:InTurn), so a startup question up at the time is answered
+-- answering one corpse being a muddle nobody wants: Yes suspends it and asks nothing more, and No goes on to the rest. All
+-- of it is asked once a group (konfer.raid.mlasked) and nothing is asked of a suspended Konfer. The foyer and the policy
+-- set to hand out loot are not offered while either of Konfer's windows is already up; the offer to suspend is, and puts
+-- them away while it is asked. It is asked in turn (konfer:InTurn), so a startup question up at the time is answered
 -- first, and whether there is anything to ask is decided when its turn comes.
 --
 -- LOOT_ADDONS are those addons by folder name. LootReserve is not among them, taking reserves and handing nothing out.
@@ -801,18 +802,23 @@ local questions = {}
 
 --
 -- A question with OK and Cancel, as wide as the untested notice and as tall as TEXT wraps to. YES is run on OK and NO on
--- Cancel. Escape puts it away answering neither. NOLABEL is what the Cancel button says instead, where it is a choice of
--- its own rather than a refusal; it is fixed when the dialog called NAME is first made. AFTER is run once it has gone,
--- however it was answered, which is what lets it be a step for konfer:InTurn.
+-- Cancel. Escape puts it away answering neither. LABELS, { yes, no }, is what either button says instead, Yes and No for a
+-- question put as one or a choice of its own in place of Cancel; it is fixed when the dialog called NAME is first made.
+-- AFTER is run once it has gone, however it was answered, which is what lets it be a step for konfer:InTurn.
 --
-local function ask(name, text, yes, no, nolabel, after)
+-- Konfer's own windows go away while it is up, so that nothing of the mod's stands behind it, and come back as it goes,
+-- whatever the answer. The dialog is gone before its answer is run, and a yes that suspends the mod puts them away again.
+--
+local function ask(name, text, yes, no, labels, after)
   local dlg = questions[name]
 
   if (not dlg) then
+    local yeslabel, nolabel = labels and labels.yes, labels and labels.no
+
     dlg = KUI:CreateDialogFrame({
       x = "CENTER", y = "MIDDLE", name = name, title = konfer:WindowTitle(), border = true, width = NOTICE_WIDTH, height = 200,
-      canmove = true, canresize = false, escclose = true, okbutton = true, cancelbutton = nolabel and { text = nolabel } or true,
-      padding = KUI.WIDGET_GAP,
+      canmove = true, canresize = false, escclose = true, okbutton = yeslabel and { text = yeslabel } or true,
+      cancelbutton = nolabel and { text = nolabel } or true, padding = KUI.WIDGET_GAP,
     })
 
     dlg.text = KUI:CreateStringLabel({
@@ -840,6 +846,8 @@ local function ask(name, text, yes, no, nolabel, after)
       local nextq = this.after
 
       this.after = nil
+      konfer:WindowsBack(this.away)
+      this.away = nil
 
       if (nextq) then
         nextq()
@@ -856,6 +864,7 @@ local function ask(name, text, yes, no, nolabel, after)
   dlg.text:SetHeight(th)
   dlg:SetHeight(dlg.rings.top + th + dlg.rings.bottom)
   dlg.yes, dlg.no, dlg.after = yes, no, after
+  dlg.away = dlg.away or konfer:WindowsAway()
   dlg:Show()
 end
 
@@ -899,7 +908,7 @@ local function offer_foyer(after)
     konfer:OpenPolicy(pol.handle)
   end, function()
     konfer:OpenFoyer()
-  end, L["Foyer"], after)
+  end, { no = L["Foyer"] }, after)
   return true
 end
 
@@ -932,7 +941,7 @@ function konfer:BecameMasterLooter()
       konfer:Suspend()
     end, function()
       konfer:InTurn(offer_foyer, true)
-    end, nil, after)
+    end, { yes = K.YES_STR, no = K.NO_STR }, after)
     return true
   end)
 end

@@ -39,6 +39,7 @@ local strfmt = string.format
 local pairs, ipairs, type = pairs, ipairs, type
 local tostring = tostring
 local max, min, ceil = math.max, math.min, math.ceil
+local IsAltKeyDown = IsAltKeyDown
 
 --
 -- THE RAID PAGE
@@ -266,6 +267,59 @@ local function selected_raider(client)
 end
 
 --
+-- The rows the policy's own buttons act on: everybody ticked whom the filter shows, as Selected acts on, or with nobody
+-- ticked the raider picked, or nobody at all.
+--
+local function chosen_raiders(client)
+  local out = {}
+
+  for _, r in ipairs(raidrows) do
+    if (client.ticked[r.name]) then
+      tinsert(out, r)
+    end
+  end
+
+  if (#out == 0) then
+    out[1] = selected_raider(client)
+  end
+
+  return out
+end
+
+-- Whether this character may take raider R out of the group: a leader anybody else, an assistant anybody holding no rank.
+local function may_remove(r)
+  local lead = KRP.is_rl or (not KRP.in_raid and KRP.is_pl)
+
+  return (r and r.name ~= K.player.name and (lead or (KRP.is_aorl and r.rank == 0))) and true or false
+end
+
+--
+-- Take NAMES out of the group, asking first, once for them all, in the active policy's words for what taking somebody out
+-- of the raid loses (RAID_REMOVE, or RAID_REMOVE_MANY for more than one). The policy is told of each raider the config
+-- holds as they go (RaidPage.Removed).
+--
+local function remove_raiders(names)
+  local one = (#names == 1)
+
+  K.ConfirmationDialog(konfer, { text = L["Remove"], owner = konfer.apol },
+    konfer.apol:Str(one and "RAID_REMOVE" or "RAID_REMOVE_MANY"),
+    one and { L["Raider: %s"], K.DisplayName(names[1]) } or { L["Raiders: %s"], tostring(#names) }, function(_, gone)
+      local pol = konfer.apol
+      local rp = pol.RaidPage
+
+      for _, name in ipairs(gone) do
+        local uid = pol.cfg and pol.cfg:FindUser(name)
+
+        if (uid and rp and rp.Removed) then
+          konfer:PolicyHook(pol, "RaidPage.Removed", nil, rp.Removed, pol.cfg.id, uid)
+        end
+
+        KRP:RemoveFromGroup(name)
+      end
+    end, names, konfer.mainwin, 140)
+end
+
+--
 -- The menu a right click on a raider puts up at the pointer, headed by who it is for: making them the group's leader, and
 -- whether they are one of its assistants, its main tank, its main assist and its master looter, and under a spacer two
 -- flyouts, of the mark they wear as a raid target, skull first and none last as the game's own menu has them, and of the
@@ -413,7 +467,8 @@ end
 -- it, and clicked takes it from them all then, or otherwise gives it to those without. Assistant is the leader's, for all
 -- but this character and the leader. Main tank and main assist are a leader's or an assistant's, secure items as on a
 -- raider's own menu, set to change only those who need it (KRP:GroupRolesAction). Under a spacer Clear raid icon, lit while
--- any of them wears a mark, and the role flyout, lit where every one of them may be given a role (KRP:CanAssign).
+-- any of them wears a mark, and the role flyout, lit where every one of them may be given a role (KRP:CanAssign). Under
+-- another Remove, which takes out of the group those of them this character may take out, asking first.
 --
 local function selected_items(client)
   local lead = KRP.is_rl or (not KRP.in_raid and KRP.is_pl)
@@ -540,6 +595,18 @@ local function selected_items(client)
 
   tinsert(items, { text = L["Raid role"], checkable = false, clickable = false, enabled = assigning,
     submenu = { name = "KonferRaidSelectedRoleMenu", itemheight = 16, items = roles } })
+
+  local going = {}
+
+  for _, r in ipairs(ticked) do
+    if (may_remove(r)) then
+      tinsert(going, r.name)
+    end
+  end
+
+  tinsert(items, { text = "-" })
+  tinsert(items, { text = L["Remove"], checkable = false, keep = false, enabled = #going > 0,
+    func = act(function() remove_raiders(going) end) })
 
   return items
 end
@@ -870,15 +937,17 @@ function konfer:InitialiseRaidUI()
     -- The raid frames' marks stand just outside the list to the left of the row, each 10 along from the last, their art
     -- leaving room round it, so the list stays centred on the names. The master looter's is last, and neither it nor its
     -- room is there where the game has no master loot. A list clips whatever is drawn outside it, so they are on a frame of
-    -- their own hung on the list's holder rather than on the row, anchored to the row and shown and hidden with it, the
-    -- list scrolling a whole row at a time.
+    -- their own hung on the list's holder rather than on the row, anchored to the row and seen exactly when it is, the
+    -- list scrolling a whole row at a time. The row's OnShow and OnHide run as it comes into sight and goes out of it, and
+    -- a row made or hidden while the page is away hears neither, so the frame starts out as the row is seen, not as it is
+    -- flagged.
     --
     newrow = function(ret, row, num)
       local marks = KUI.MakeFrame("Frame", nil, lframe)
 
       marks:SetSize(12 + 10 + (K.HAS_MASTER_LOOT and 10 or 0), RAID_ROW_H)
       marks:SetPoint("RIGHT", row, "LEFT", -2, 0)
-      marks:SetShown(row:IsShown())
+      marks:SetShown(row:IsVisible())
       row:HookScript("OnShow", function()
         marks:Show()
       end)
@@ -931,7 +1000,7 @@ function konfer:InitialiseRaidUI()
 
       ready:SetSize(READY_SIZE, RAID_ROW_H)
       ready:SetPoint("LEFT", row, "RIGHT", ret:CheckStrip() + KUI.SCROLLBAR_COMPENSATE + 2, 0)
-      ready:SetShown(row:IsShown())
+      ready:SetShown(row:IsVisible())
       row:HookScript("OnShow", function()
         ready:Show()
       end)
@@ -965,8 +1034,21 @@ function konfer:InitialiseRaidUI()
       end)
 
       -- A right click picks the raider as a left one does, and for a leader or an assistant puts up what can be done to them.
+      -- An Alt-click ticks or unticks them as their box does, where the boxes are up, and leaves the raider picked as it was.
+      local pick = row:GetScript("OnClick")
+
       row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
-      row:HookScript("OnClick", function(this, button)
+      row:SetScript("OnClick", function(this, button)
+        if (button == "LeftButton" and IsAltKeyDown()) then
+          if (client.checking) then
+            ret:SetItemChecked(this:GetID(), not ret:GetItemChecked(this:GetID()))
+          end
+
+          return
+        end
+
+        pick(this, button)
+
         if (button == "RightButton") then
           raid_menu(client)
         end
@@ -1074,7 +1156,7 @@ function konfer:InitialiseRaidUI()
   -- Selected is the config's admins' alone, always there for them and lit only while there are any ticked, and so is Consent,
   -- there where the game has no master loot (lay_top_row). For anybody else the row is the other three, centred. The second
   -- row is the active policy's own buttons with Remove among them, which takes the raider picked out of the group, asking
-  -- first (lay_second_row). Broadcast sends the config to the raid, for whoever missed what it holds as it happened. Each is
+  -- first (lay_second_row), those ticked being taken out from Selected. Broadcast sends the config to the raid, for whoever missed what it holds as it happened. Each is
   -- lit only while it can do something (client.sync).
   --
   client.btnw = RAID_BTN_W
@@ -1140,39 +1222,20 @@ function konfer:InitialiseRaidUI()
   bottom:SetPoint("TOP", client.buttons, "TOP", 0, 0 - RAID_BTN_H - KUI.WIDGET_GAP)
   client.bottomrow = bottom
 
-  --
-  -- Remove asks first, in the active policy's words for what taking somebody out of the raid loses (RAID_REMOVE), and the
-  -- policy is told of a raider the config holds once they are gone (RaidPage.Removed).
-  --
   client.removebtn = button(bottom, 0, L["Remove"], L["TIP_RAID_REMOVE"], function()
-    local pp = konfer.apol
     local r = selected_raider(client)
 
-    if (not r) then
-      return
+    if (may_remove(r)) then
+      remove_raiders({ r.name })
     end
-
-    K.ConfirmationDialog(konfer, { text = L["Remove"], owner = pp }, pp:Str("RAID_REMOVE"),
-      { L["Raider: %s"], K.DisplayName(r.name) }, function(_, name)
-        local pol = konfer.apol
-        local rp = pol.RaidPage
-        local uid = pol.cfg and pol.cfg:FindUser(name)
-
-        if (uid and rp and rp.Removed) then
-          konfer:PolicyHook(pol, "RaidPage.Removed", nil, rp.Removed, pol.cfg.id, uid)
-        end
-
-        KRP:RemoveFromGroup(name)
-      end, r.name, konfer.mainwin, 140)
   end)
 
   lay_second_row(client, nil)
 
   --
   -- Rate wants somebody Kore knows. Ready check is a leader's or an assistant's, while no check is running. Broadcast is the
-  -- Sync page's, an admin's whom the raid will take it from and not while the last broadcast's wait runs. Remove wants
-  -- somebody else whom this character may take out, which for a leader is anybody and for an assistant anybody holding no
-  -- rank. Consent wants the leader (konfer:MayCollect). Selected wants a tick, and its items say for themselves what each
+  -- Sync page's, an admin's whom the raid will take it from and not while the last broadcast's wait runs. Remove wants a
+  -- raider picked whom this character may take out (may_remove). Consent wants the leader (konfer:MayCollect). Selected wants a tick, and its items say for themselves what each
   -- can do. Each of the policy's own buttons is lit as it says (RaidPage.buttons), and dark without a config.
   --
   client.sync = function()
@@ -1180,7 +1243,6 @@ function konfer:InitialiseRaidUI()
     local r = selected_raider(client)
     local cfg = pp and pp.cfg
     local admin = (cfg and cfg:MyStatus()) and true or false
-    local lead = KRP.is_rl or (not KRP.in_raid and KRP.is_pl)
     local ticked = 0
 
     -- The boxes and the role filter are an admin's, and the ticks go when this character stops being one.
@@ -1213,8 +1275,9 @@ function konfer:InitialiseRaidUI()
     client.selectedmenu:SetText(strfmt(L["Selected (%d)"], ticked))
     client.selectedmenu:SetEnabled(ticked > 0)
     refill_selected(client)
-    client.removebtn:SetEnabled((r and r.name ~= K.player.name and (lead or (KRP.is_aorl and r.rank == 0))) and true
-      or false)
+    client.removebtn:SetEnabled(may_remove(r))
+
+    local chosen = chosen_raiders(client)
 
     for _, b in ipairs((pp and pp.RaidPage and pp.RaidPage.buttons) or {}) do
       local btn = (b ~= "remove") and pp.raidbuttons and pp.raidbuttons[b.name]
@@ -1223,7 +1286,7 @@ function konfer:InitialiseRaidUI()
         local lit = false
 
         if (cfg and b.Enabled) then
-          local _, on = konfer:PolicyHook(pp, "RaidPage.buttons.Enabled", false, b.Enabled, cfg.id, r, admin)
+          local _, on = konfer:PolicyHook(pp, "RaidPage.buttons.Enabled", false, b.Enabled, cfg.id, chosen, admin)
 
           lit = on
         end
@@ -1292,7 +1355,7 @@ function konfer:BuildRaidPolicyUI(pp)
         local pol = konfer.apol
 
         if (pol.cfg and b.Click) then
-          konfer:PolicyHook(pol, "RaidPage.buttons.Click", nil, b.Click, pol.cfg.id, selected_raider(client))
+          konfer:PolicyHook(pol, "RaidPage.buttons.Click", nil, b.Click, pol.cfg.id, chosen_raiders(client))
         end
       end)
       pp.raidbuttons[b.name] = btn
